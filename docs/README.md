@@ -50,6 +50,30 @@ The project uses these important build flags in `platformio.ini`:
 - `ARDUINO_USB_CDC_ON_BOOT=0`: Disable CDC on boot to allow MIDI
 - `BOARD_HAS_USB_NATIVE=1`: Indicate native USB support
 
+#### Optional: Force Receiver Subscription (Test)
+
+For testing, you can force the device to start directly in receiver mode and subscribe to a specific "layer" without sending a SysEx command.
+
+Use the following define either at the top of `src/main.cpp` or via `platformio.ini` build flags:
+
+- `FORCE_RECEIVER_LAYER="LayerName"`
+
+Example using `platformio.ini`:
+
+```ini
+[env:esp32-s3-devkitc-1]
+build_flags =
+   -DARDUINO_USB_MODE=1
+   -DARDUINO_USB_CDC_ON_BOOT=0
+   -DFORCE_RECEIVER_LAYER=\"TestLayer\"
+```
+
+When this define is present, the firmware:
+
+- Enables receiver mode on boot
+- Subscribes to the specified layer
+- Will still accept a later SysEx Subscribe Layer message that can change the subscription
+
 ### MIDI Library
 
 The project uses the `USBMIDI` library for ESP32-S3, which provides:
