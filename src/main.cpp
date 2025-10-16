@@ -31,6 +31,7 @@
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+#include "sysex.h"
 
 namespace {
 
@@ -96,6 +97,12 @@ void setup() {
 
   midiInit();
   DEBUG_SERIAL.println("[INIT] USB MIDI initialized");
+  
+  // Wait for USB to fully enumerate before sending HELLO
+  delay(500);
+  
+  // Send HELLO to notify Bridge of boot/reboot
+  sendHello();
 
   meshClock.setDebugLog(0);  // LOG_ALL / LOG_SYNC / LOG_BCAST / LOG_RX / 0
   meshClock.begin(false);
@@ -148,6 +155,18 @@ void loop() {
     if (now - lastBridgeReport >= BRIDGE_REPORT_INTERVAL_MS) {
       lastBridgeReport = now;
       reportReceiversToBridge();
+    }
+    
+    // Process delayed packets for RF simulation
+    if (rfSimulationEnabled) {
+      for (int i = 0; i < MAX_DELAYED_PACKETS; i++) {
+        if (delayedPackets[i].active && now >= delayedPackets[i].sendTime) {
+          esp_now_send(delayedPackets[i].receiverMac, 
+                      reinterpret_cast<uint8_t*>(&delayedPackets[i].packet), 
+                      sizeof(MediaSyncPacket));
+          delayedPackets[i].active = false;
+        }
+      }
     }
   }
 

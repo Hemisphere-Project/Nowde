@@ -97,8 +97,8 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
     mediaSyncState.localClockStartTime = now;
   }
 
-  // Handle media index changes
-  if (mediaSyncState.lastSentIndex != syncPacket->mediaIndex) {
+  // Handle media index changes (but not when stopping - that's handled by state transition)
+  if (mediaSyncState.lastSentIndex != syncPacket->mediaIndex && syncPacket->mediaIndex != 0) {
     midiSendCC100(syncPacket->mediaIndex);
     mediaSyncState.lastSentIndex = syncPacket->mediaIndex;
   }
@@ -107,7 +107,7 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   if (stateChangedToPlaying) {
     DEBUG_SERIAL.println("[MEDIA SYNC] Media started playing");
   } else if (stateChangedToStopped) {
-    // Just stopped: send CC#100 = 0 to signal stop
+    // Just stopped: send CC#100 = 0 to signal stop (only place where CC#100=0 is sent)
     DEBUG_SERIAL.println("[MEDIA SYNC] Media stopped - sending CC#100=0");
     midiSendCC100(0);
     mediaSyncState.lastSentIndex = 0;

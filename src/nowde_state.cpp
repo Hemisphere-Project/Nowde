@@ -18,6 +18,12 @@ unsigned long lastBridgeReport = 0;
 
 MediaSyncState mediaSyncState;
 
+// RF Simulation state
+bool rfSimulationEnabled = false;
+unsigned long rfSimMaxDelayMs = 400; // Default max delay 400ms
+
+DelayedMediaSyncPacket delayedPackets[MAX_DELAYED_PACKETS] = {};
+
 bool macEqual(const uint8_t* mac1, const uint8_t* mac2) {
   for (int i = 0; i < 6; i++) {
     if (mac1[i] != mac2[i]) {

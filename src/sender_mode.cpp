@@ -10,23 +10,49 @@
 void cleanupReceiverTable() {
   unsigned long now = millis();
   for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active && receiverTable[i].connected &&
-        (now - receiverTable[i].lastSeen > RECEIVER_TIMEOUT_MS)) {
-      receiverTable[i].connected = false;
+    if (receiverTable[i].active) {
+      unsigned long timeSinceLastSeen = now - receiverTable[i].lastSeen;
+      
+      // Mark as disconnected after RECEIVER_TIMEOUT_MS (5s)
+      if (receiverTable[i].connected && timeSinceLastSeen > RECEIVER_TIMEOUT_MS) {
+        receiverTable[i].connected = false;
 
-      DEBUG_SERIAL.println("\n[TIMEOUT] Receiver marked as MISSING");
-      DEBUG_SERIAL.print("  MAC: ");
-      for (int j = 0; j < 6; j++) {
-        DEBUG_SERIAL.printf("%02X", receiverTable[i].mac[j]);
-        if (j < 5) {
-          DEBUG_SERIAL.print(":");
+        DEBUG_SERIAL.println("\n[TIMEOUT] Receiver marked as MISSING");
+        DEBUG_SERIAL.print("  MAC: ");
+        for (int j = 0; j < 6; j++) {
+          DEBUG_SERIAL.printf("%02X", receiverTable[i].mac[j]);
+          if (j < 5) {
+            DEBUG_SERIAL.print(":");
+          }
         }
+        DEBUG_SERIAL.println();
+        DEBUG_SERIAL.print("  Layer: ");
+        DEBUG_SERIAL.println(receiverTable[i].layer);
+        DEBUG_SERIAL.println("  Status: MISSING");
+        DEBUG_SERIAL.println();
       }
-      DEBUG_SERIAL.println();
-      DEBUG_SERIAL.print("  Layer: ");
-      DEBUG_SERIAL.println(receiverTable[i].layer);
-      DEBUG_SERIAL.println("  Status: MISSING");
-      DEBUG_SERIAL.println();
+      
+      // Completely remove after 30 seconds (allows reconnection window)
+      if (timeSinceLastSeen > 30000) {
+        DEBUG_SERIAL.println("\n[CLEANUP] Receiver removed from table");
+        DEBUG_SERIAL.print("  MAC: ");
+        for (int j = 0; j < 6; j++) {
+          DEBUG_SERIAL.printf("%02X", receiverTable[i].mac[j]);
+          if (j < 5) {
+            DEBUG_SERIAL.print(":");
+          }
+        }
+        DEBUG_SERIAL.println();
+        DEBUG_SERIAL.printf("  Time inactive: %lu seconds\r\n", timeSinceLastSeen / 1000);
+        DEBUG_SERIAL.println();
+        
+        // Remove from ESP-NOW peer list
+        esp_now_del_peer(receiverTable[i].mac);
+        
+        // Mark slot as free
+        receiverTable[i].active = false;
+        receiverTable[i].connected = false;
+      }
     }
   }
 }
@@ -49,120 +75,12 @@ void reportReceiversToBridge() {
     return;
   }
 
-  uint8_t msg[256];
-  int idx = 0;
-
-  msg[idx++] = SYSEX_START;
-  msg[idx++] = SYSEX_MANUFACTURER_ID;
-  msg[idx++] = SYSEX_CMD_RECEIVER_TABLE;
-
-  uint8_t count = 0;
-  for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active) {
-      count++;
-    }
-  }
-  msg[idx++] = count;
-
-  static uint8_t lastCount = 255;
-  static bool lastConnectedStates[MAX_RECEIVERS] = {false};
-  bool countChanged = (count != lastCount);
-  bool statusChanged = false;
-
-  for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active && receiverTable[i].connected != lastConnectedStates[i]) {
-      statusChanged = true;
-      lastConnectedStates[i] = receiverTable[i].connected;
-    }
-  }
-
-  if (countChanged || statusChanged) {
-    DEBUG_SERIAL.println("\n[BRIDGE REPORT] Receiver table update");
-    DEBUG_SERIAL.printf("  Receivers: %d\r\n", count);
-    for (int i = 0; i < MAX_RECEIVERS; i++) {
-      if (receiverTable[i].active) {
-        DEBUG_SERIAL.print("    - ");
-        for (int j = 0; j < 6; j++) {
-          DEBUG_SERIAL.printf("%02X", receiverTable[i].mac[j]);
-          if (j < 5) {
-            DEBUG_SERIAL.print(":");
-          }
-        }
-        DEBUG_SERIAL.print(" v");
-        DEBUG_SERIAL.print(receiverTable[i].version);
-        DEBUG_SERIAL.print(" (");
-        DEBUG_SERIAL.print(receiverTable[i].layer);
-        DEBUG_SERIAL.print(") - ");
-        DEBUG_SERIAL.println(receiverTable[i].connected ? "ACTIVE" : "MISSING");
-      }
-    }
-    DEBUG_SERIAL.println();
-    lastCount = count;
-  }
-
-  for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active) {
-      for (int j = 0; j < 6; j++) {
-        msg[idx++] = receiverTable[i].mac[j];
-      }
-      for (int j = 0; j < MAX_LAYER_LENGTH; j++) {
-        msg[idx++] = receiverTable[i].layer[j];
-      }
-      for (int j = 0; j < MAX_VERSION_LENGTH; j++) {
-        msg[idx++] = receiverTable[i].version[j];
-      }
-      msg[idx++] = receiverTable[i].connected ? 1 : 0;
-    }
-  }
-
-  msg[idx++] = SYSEX_END;
-
-  if (countChanged || statusChanged) {
-    DEBUG_SERIAL.print("[BRIDGE TX] SysEx (");
-    DEBUG_SERIAL.print(idx);
-    DEBUG_SERIAL.print(" bytes): ");
-    for (int i = 0; i < idx; i++) {
-      DEBUG_SERIAL.printf("%02X ", msg[i]);
-    }
-    DEBUG_SERIAL.println();
-  }
-
-  int msgIdx = 0;
-  while (msgIdx < idx) {
-    midiEventPacket_t packet;
-    int remaining = idx - msgIdx;
-
-    if (msgIdx == 0) {
-      packet.header = 0x04;
-      packet.byte1 = msg[msgIdx++];
-      packet.byte2 = (remaining > 1) ? msg[msgIdx++] : 0;
-      packet.byte3 = (remaining > 2) ? msg[msgIdx++] : 0;
-    } else if (remaining <= 3 && msg[idx - 1] == SYSEX_END) {
-      if (remaining == 1) {
-        packet.header = 0x05;
-        packet.byte1 = msg[msgIdx++];
-        packet.byte2 = 0;
-        packet.byte3 = 0;
-      } else if (remaining == 2) {
-        packet.header = 0x06;
-        packet.byte1 = msg[msgIdx++];
-        packet.byte2 = msg[msgIdx++];
-        packet.byte3 = 0;
-      } else {
-        packet.header = 0x07;
-        packet.byte1 = msg[msgIdx++];
-        packet.byte2 = msg[msgIdx++];
-        packet.byte3 = msg[msgIdx++];
-      }
-    } else {
-      packet.header = 0x04;
-      packet.byte1 = msg[msgIdx++];
-      packet.byte2 = (remaining > 1) ? msg[msgIdx++] : 0;
-      packet.byte3 = (remaining > 2) ? msg[msgIdx++] : 0;
-    }
-
-    midiWritePacket(packet);
-  }
+  // This function is now deprecated - receiver table reporting moved to RUNNING_STATE (0x21)
+  // The Bridge uses QUERY_RUNNING_STATE (0x03) to get receiver info
+  // This function may still be called from legacy code paths but does nothing
+  
+    // Legacy reporting removed - use sendRunningState() in sysex.cpp instead
+  return;
 }
 
 void handleSenderBeacon(const esp_now_recv_info_t* info) {
