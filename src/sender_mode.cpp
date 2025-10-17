@@ -144,6 +144,9 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
   for (int i = 0; i < MAX_RECEIVERS; i++) {
     if (receiverTable[i].active && macEqual(receiverTable[i].mac, info->src_addr)) {
       receiverTable[i].lastSeen = millis();
+      
+      // Update media index silently (no logging)
+      receiverTable[i].mediaIndex = recvInfo->mediaIndex;
 
       // Only log on RECONNECTION (was disconnected, now connected again)
       if (!receiverTable[i].connected) {
@@ -202,6 +205,7 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
     receiverTable[freeSlot].lastSeen = millis();
     receiverTable[freeSlot].active = true;
     receiverTable[freeSlot].connected = true;
+    receiverTable[freeSlot].mediaIndex = recvInfo->mediaIndex;  // Initialize media index
     changed = true;
 
     esp_now_peer_info_t peerInfo = {};

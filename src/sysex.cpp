@@ -437,8 +437,8 @@ void sendConfigState() {
 }
 
 void sendRunningState() {
-  // Format: F0 7D 21 [uptimeMs(4,encoded)] [meshSynced(1)] [numReceivers(1)]
-  //         For each receiver: [receiverData(35 bytes, encoded)]
+  // Format: F0 7D 22 [uptimeMs(4,encoded:5)] [meshSynced(1)] [numReceivers(1)]
+  //         For each receiver: [receiverData(36 bytes, encoded:42)]
   //         F7
   // All multi-byte fields are 7-bit encoded to prevent 0x80-0xFF bytes in data
   
@@ -475,6 +475,7 @@ void sendRunningState() {
       numActive++;
     }
   }
+  
   message[msgIdx++] = numActive;  // Safe as-is (typically small number)
   
   // Add each receiver's data (encoded)
@@ -504,7 +505,10 @@ void sendRunningState() {
       // Active (1 byte)
       rawData[rawIdx++] = 1;
       
-      // Encode receiver data (35 bytes -> 40 bytes encoded)
+      // Media index (1 byte) - current playing media index (0 = stopped)
+      rawData[rawIdx++] = receiverTable[i].mediaIndex;
+      
+      // Encode receiver data (36 bytes -> 42 bytes encoded)
       msgIdx += encode7bit(rawData, rawIdx, &message[msgIdx]);
     }
   }

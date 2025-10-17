@@ -63,6 +63,7 @@ struct ReceiverInfo {
   uint8_t type = ESPNOW_MSG_RECEIVER_INFO;
   char layer[MAX_LAYER_LENGTH];
   char version[MAX_VERSION_LENGTH];
+  uint8_t mediaIndex;  // Current playing media index (0 = stopped)
 } __attribute__((packed));
 
 struct MediaSyncPacket {
@@ -87,6 +88,7 @@ struct ReceiverEntry {
   unsigned long lastSeen;
   bool active;
   bool connected;
+  uint8_t mediaIndex;  // Current playing media index (0 = stopped)
 };
 
 struct MediaSyncState {

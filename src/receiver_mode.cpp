@@ -39,6 +39,9 @@ void sendReceiverInfo() {
   info.layer[MAX_LAYER_LENGTH - 1] = '\0';
   strncpy(info.version, NOWDE_VERSION, MAX_VERSION_LENGTH);
   info.version[MAX_VERSION_LENGTH - 1] = '\0';
+  
+  // Populate current playing media index (0 = stopped)
+  info.mediaIndex = mediaSyncState.currentIndex;
 
   for (int i = 0; i < MAX_SENDERS; i++) {
     if (senderTable[i].active) {
