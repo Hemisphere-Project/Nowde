@@ -15,6 +15,10 @@
 #define BRIDGE_REPORT_INTERVAL_MS 500
 #define DEFAULT_RECEIVER_LAYER "-"
 
+// ============= MEDIA SYNC CONFIGURATION =============
+// Interval for repeating CC#100 while playing (0 = disable auto-repeat)
+#define CC100_REPEAT_INTERVAL_MS 1000
+
 // ============= LOGGING CONFIGURATION =============
 #define DEBUG_SERIAL Serial
 
@@ -101,6 +105,7 @@ struct MediaSyncState {
   bool linkLost = false;
   bool stopOnLinkLost = true;  // Configurable: stop or continue on link lost
   uint8_t lastSentIndex = 255;
+  unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
 };
 
 constexpr uint8_t MTC_FRAMERATE = 30;

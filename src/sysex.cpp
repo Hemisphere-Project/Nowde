@@ -154,17 +154,29 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       break;
 
     case SYSEX_CMD_MEDIA_SYNC:
-      if (senderModeEnabled && length >= 26) {
+      if (senderModeEnabled && length >= 27) {
         char targetLayer[MAX_LAYER_LENGTH];
         memcpy(targetLayer, &data[3], MAX_LAYER_LENGTH);
         targetLayer[MAX_LAYER_LENGTH - 1] = '\0';
 
         uint8_t mediaIndex = data[19];
-        uint32_t positionMs = (static_cast<uint32_t>(data[20]) << 24) |
-                              (static_cast<uint32_t>(data[21]) << 16) |
-                              (static_cast<uint32_t>(data[22]) << 8) |
-                              static_cast<uint32_t>(data[23]);
-        uint8_t state = data[24];
+        
+        // Decode 7-bit encoded position (5 bytes -> 4 bytes)
+        // Format: [MSB byte][data1][data2][data3][data4]
+        uint8_t msbByte = data[20];
+        uint8_t positionBytes[4];
+        for (int i = 0; i < 4; i++) {
+          positionBytes[i] = data[21 + i];
+          if (msbByte & (1 << i)) {
+            positionBytes[i] |= 0x80;
+          }
+        }
+        
+        uint32_t positionMs = (static_cast<uint32_t>(positionBytes[0]) << 24) |
+                              (static_cast<uint32_t>(positionBytes[1]) << 16) |
+                              (static_cast<uint32_t>(positionBytes[2]) << 8) |
+                              static_cast<uint32_t>(positionBytes[3]);
+        uint8_t state = data[25];
         uint32_t meshTimestamp = meshClock.meshMillis();
 
         // Only log media sync on state changes or media index changes

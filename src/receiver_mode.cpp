@@ -104,6 +104,7 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   if (mediaSyncState.lastSentIndex != syncPacket->mediaIndex && syncPacket->mediaIndex != 0) {
     midiSendCC100(syncPacket->mediaIndex);
     mediaSyncState.lastSentIndex = syncPacket->mediaIndex;
+    mediaSyncState.lastCC100SendTime = now;
   }
 
   // Handle state transitions
@@ -114,6 +115,17 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
     DEBUG_SERIAL.println("[MEDIA SYNC] Media stopped - sending CC#100=0");
     midiSendCC100(0);
     mediaSyncState.lastSentIndex = 0;
+    mediaSyncState.lastCC100SendTime = now;
+  }
+  // Periodic CC#100 resend while playing (every CC100_REPEAT_INTERVAL_MS)
+  // This allows late-started devices to catch up even if they missed initial CC
+  // Set CC100_REPEAT_INTERVAL_MS to 0 in nowde_config.h to disable
+  else if (CC100_REPEAT_INTERVAL_MS > 0 &&
+           mediaSyncState.currentState == 1 && 
+           mediaSyncState.currentIndex > 0 &&
+           (now - mediaSyncState.lastCC100SendTime) >= CC100_REPEAT_INTERVAL_MS) {
+    midiSendCC100(mediaSyncState.currentIndex);
+    mediaSyncState.lastCC100SendTime = now;
   }
 
   static int syncCount = 0;
