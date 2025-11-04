@@ -3,6 +3,8 @@
 #include <cstring>
 
 #include <esp_now.h>
+#include <esp_system.h>
+#include <Update.h>
 
 #include "midi.h"
 #include "nowde_config.h"
@@ -10,6 +12,12 @@
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+
+// OTA state tracking
+static bool otaInProgress = false;
+static size_t otaTotalSize = 0;
+static size_t otaReceivedSize = 0;
+static uint32_t otaStartTime = 0;
 
 // Forward declarations for helper functions
 void sendHello();
@@ -154,16 +162,89 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       break;
 
     case SYSEX_CMD_ENTER_BOOTLOADER:
-      // Only allow if in sender mode (security measure)
+      // Deprecated - use OTA instead
       if (senderModeEnabled && length >= 4) {
-        DEBUG_SERIAL.println("\n[BOOTLOADER] Entering download mode...");
-        DEBUG_SERIAL.println("Firmware update mode activated");
-        DEBUG_SERIAL.flush();  // Ensure message is sent
+        DEBUG_SERIAL.println("\n[BOOTLOADER] Command deprecated - use OTA instead");
+      }
+      break;
+
+    case SYSEX_CMD_OTA_BEGIN:
+      // Format: F0 7D 05 [size(4 bytes, 7-bit encoded)] F7
+      if (senderModeEnabled && length >= 9) {
+        // Decode firmware size (4 bytes raw -> 5 bytes encoded)
+        uint8_t sizeBytes[4];
+        decode7bit(&data[3], 5, sizeBytes);
         
-        delay(100);  // Give time for serial message to flush
+        otaTotalSize = (static_cast<uint32_t>(sizeBytes[0]) << 24) |
+                       (static_cast<uint32_t>(sizeBytes[1]) << 16) |
+                       (static_cast<uint32_t>(sizeBytes[2]) << 8) |
+                       static_cast<uint32_t>(sizeBytes[3]);
         
-        // Reboot into ROM bootloader
-        esp_restart();
+        DEBUG_SERIAL.printf("\n[OTA BEGIN] Starting firmware update, size=%u bytes\r\n", otaTotalSize);
+        
+        if (!Update.begin(otaTotalSize)) {
+          DEBUG_SERIAL.println("[OTA BEGIN] FAILED - not enough space");
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+          break;
+        }
+        
+        otaInProgress = true;
+        otaReceivedSize = 0;
+        otaStartTime = millis();
+        
+        DEBUG_SERIAL.println("[OTA BEGIN] Ready to receive firmware data");
+      }
+      break;
+
+    case SYSEX_CMD_OTA_DATA:
+      // Format: F0 7D 06 [data(7-bit encoded)] F7
+      if (otaInProgress && length > 4) {
+        // Decode data (encoded length - 3 for header/footer)
+        uint8_t encodedLen = length - 4;  // Subtract F0, 7D, 06, F7
+        uint8_t decodedData[256];
+        int decodedLen = decode7bit(&data[3], encodedLen, decodedData);
+        
+        // Write to OTA partition
+        size_t written = Update.write(decodedData, decodedLen);
+        if (written != decodedLen) {
+          DEBUG_SERIAL.printf("[OTA DATA] Write failed: %d/%d bytes\r\n", written, decodedLen);
+          Update.abort();
+          otaInProgress = false;
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+          break;
+        }
+        
+        otaReceivedSize += decodedLen;
+        
+        // Log progress every 10%
+        static uint8_t lastPercent = 0;
+        uint8_t percent = (otaReceivedSize * 100) / otaTotalSize;
+        if (percent >= lastPercent + 10) {
+          DEBUG_SERIAL.printf("[OTA DATA] Progress: %u%% (%u/%u bytes)\r\n", 
+                             percent, otaReceivedSize, otaTotalSize);
+          lastPercent = percent;
+        }
+      }
+      break;
+
+    case SYSEX_CMD_OTA_END:
+      // Format: F0 7D 07 F7
+      if (otaInProgress) {
+        DEBUG_SERIAL.printf("\n[OTA END] Finalizing firmware (%u bytes in %lu ms)\r\n",
+                           otaReceivedSize, millis() - otaStartTime);
+        
+        if (Update.end(true)) {
+          DEBUG_SERIAL.println("[OTA END] SUCCESS - Rebooting in 2 seconds...");
+          DEBUG_SERIAL.flush();
+          
+          delay(2000);
+          esp_restart();
+        } else {
+          DEBUG_SERIAL.printf("[OTA END] FAILED - Error: %s\r\n", Update.errorString());
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+        }
+        
+        otaInProgress = false;
       }
       break;
 
