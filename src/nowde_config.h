@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "1.1"
+#define NOWDE_VERSION "1.0"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -47,6 +47,7 @@
 #define SYSEX_CMD_HELLO 0x20
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
+#define SYSEX_CMD_OTA_ACK 0x23
 #define SYSEX_CMD_ERROR_REPORT 0x30
 
 // Error codes for ERROR_REPORT

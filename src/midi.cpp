@@ -94,9 +94,11 @@ void midiProcess() {
             if (bytes[i] == SYSEX_END) {
               // Only log SysEx for non-repetitive messages (to reduce clutter)
               // Skip: MEDIA_SYNC (0x10) sent at 10Hz, QUERY_RUNNING_STATE (0x03) sent at 1Hz
+              // Skip: OTA_DATA (0x06) during firmware updates (thousands of messages)
               bool isRepetitive = (sysexIndex >= 3 && 
                                    (sysexBuffer[2] == SYSEX_CMD_MEDIA_SYNC || 
-                                    sysexBuffer[2] == SYSEX_CMD_QUERY_RUNNING_STATE));
+                                    sysexBuffer[2] == SYSEX_CMD_QUERY_RUNNING_STATE ||
+                                    sysexBuffer[2] == 0x06));  // OTA_DATA
               if (!isRepetitive) {
                 DEBUG_SERIAL.print("[SYSEX RX] ");
                 for (int j = 0; j < sysexIndex; j++) {
