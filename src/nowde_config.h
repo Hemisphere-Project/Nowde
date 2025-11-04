@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "1.0"
+#define NOWDE_VERSION "1.1"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10

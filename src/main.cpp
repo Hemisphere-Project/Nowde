@@ -51,14 +51,15 @@ void configureUsbDescriptors() {
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
   
-  // Create product name: "Nowde 1.0 - DDEEFF" (last 3 bytes of MAC)
+  // Create product name: "Nowde - DDEEFF" (last 3 bytes of MAC)
+  // Version is sent via HELLO SysEx message instead of USB descriptor
   // NOTE: macOS caches MIDI device names. To clear cache after firmware update:
   //   sudo rm -rf ~/Library/Preferences/com.apple.audio.midi*
   //   sudo killall coreaudiod
   //   (Then unplug/replug device or restart Mac)
   char productName[32];
-  snprintf(productName, sizeof(productName), "Nowde %s - %02X%02X%02X", 
-           NOWDE_VERSION, mac[3], mac[4], mac[5]);
+  snprintf(productName, sizeof(productName), "Nowde - %02X%02X%02X", 
+           mac[3], mac[4], mac[5]);
   
   DEBUG_SERIAL.print("[USB] Setting product name: ");
   DEBUG_SERIAL.println(productName);
