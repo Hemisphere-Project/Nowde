@@ -40,7 +40,7 @@ namespace {
 void printBanner() {
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("═══════════════════════════════════");
-  DEBUG_SERIAL.println("      NOWDE ESP-NOW v1.0 Startup     ");
+  DEBUG_SERIAL.println("      NOWDE ESP-NOW v" NOWDE_VERSION "      ");
   DEBUG_SERIAL.println("        Hemisphere Project 2025      ");
   DEBUG_SERIAL.println("═══════════════════════════════════");
   DEBUG_SERIAL.println();
