@@ -182,9 +182,15 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         
         DEBUG_SERIAL.printf("\n[OTA BEGIN] Starting firmware update, size=%u bytes\r\n", otaTotalSize);
         
-        // Begin OTA update - specify we're updating sketch (app partition)
-        // Using UPDATE_SIZE_UNKNOWN lets the library auto-detect and allocate space
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+        // Abort any previous OTA session
+        if (Update.isRunning()) {
+          Update.abort();
+          DEBUG_SERIAL.println("[OTA BEGIN] Aborted previous OTA session");
+        }
+        
+        // Begin OTA update with the exact size - this is required for validation
+        // U_FLASH means we're updating the app partition (not SPIFFS)
+        if (!Update.begin(otaTotalSize, U_FLASH)) {
           DEBUG_SERIAL.printf("[OTA BEGIN] FAILED - Error: %s\r\n", Update.errorString());
           DEBUG_SERIAL.printf("[OTA BEGIN] Error code: %d\r\n", Update.getError());
           sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
@@ -196,7 +202,7 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         otaStartTime = millis();
         
         DEBUG_SERIAL.println("[OTA BEGIN] Ready to receive firmware data");
-        DEBUG_SERIAL.printf("[OTA BEGIN] Target partition size: %u bytes\r\n", Update.size());
+        DEBUG_SERIAL.printf("[OTA BEGIN] Allocated partition size: %u bytes\r\n", Update.size());
       }
       break;
 
@@ -221,33 +227,15 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         otaReceivedSize += decodedLen;
         
         // Log progress every 10%
-        static uint8_t lastPercent = 0;
         uint8_t percent = (otaReceivedSize * 100) / otaTotalSize;
-        if (percent >= lastPercent + 10) {
+        static uint8_t lastPercent = 0;
+        if (percent >= lastPercent + 10 || lastPercent == 0) {
           DEBUG_SERIAL.printf("[OTA DATA] Progress: %u%% (%u/%u bytes)\r\n", 
                              percent, otaReceivedSize, otaTotalSize);
           lastPercent = percent;
-        }
-        
-        // Send ACK every 50 chunks to let Bridge know we're keeping up
-        static uint16_t chunkCount = 0;
-        chunkCount++;
-        if (chunkCount % 50 == 0) {
-          // Send OTA_ACK: F0 7D 23 F7
-          uint8_t ackMsg[4] = {SYSEX_START, SYSEX_MANUFACTURER_ID, SYSEX_CMD_OTA_ACK, SYSEX_END};
-          
-          midiEventPacket_t packet;
-          packet.header = 0x07;  // SysEx ends with 3 bytes
-          packet.byte1 = ackMsg[0];
-          packet.byte2 = ackMsg[1];
-          packet.byte3 = ackMsg[2];
-          midiWritePacket(packet);
-          
-          packet.header = 0x05;  // SysEx end (single byte)
-          packet.byte1 = ackMsg[3];
-          packet.byte2 = 0;
-          packet.byte3 = 0;
-          midiWritePacket(packet);
+          if (percent >= 90) {
+            lastPercent = 0;  // Reset for next OTA session
+          }
         }
       }
       break;
