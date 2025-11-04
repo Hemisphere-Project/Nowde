@@ -4,3 +4,4 @@
 
 void saveLayerToEEPROM(const char* layer);
 String loadLayerFromEEPROM();
+void clearEEPROM();

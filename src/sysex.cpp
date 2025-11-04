@@ -153,6 +153,20 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_ENTER_BOOTLOADER:
+      // Only allow if in sender mode (security measure)
+      if (senderModeEnabled && length >= 4) {
+        DEBUG_SERIAL.println("\n[BOOTLOADER] Entering download mode...");
+        DEBUG_SERIAL.println("Firmware update mode activated");
+        DEBUG_SERIAL.flush();  // Ensure message is sent
+        
+        delay(100);  // Give time for serial message to flush
+        
+        // Reboot into ROM bootloader
+        esp_restart();
+      }
+      break;
+
     case SYSEX_CMD_MEDIA_SYNC:
       if (senderModeEnabled && length >= 27) {
         char targetLayer[MAX_LAYER_LENGTH];
@@ -233,34 +247,15 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
     case SYSEX_CMD_CHANGE_RECEIVER_LAYER:
-      // When received by RECEIVER via ESP-NOW from sender
-      if (receiverModeEnabled && length >= 4) {
-        int layerLen = min<int>(length - 4, MAX_LAYER_LENGTH - 1);
-        char newLayer[MAX_LAYER_LENGTH];
-        memcpy(newLayer, &data[3], layerLen);
-        newLayer[layerLen] = '\0';
-        
-        // Update subscribed layer
-        strncpy(subscribedLayer, newLayer, MAX_LAYER_LENGTH);
-        subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
-        
-        // Save to NVS
-        saveLayerToEEPROM(subscribedLayer);
-        
-        DEBUG_SERIAL.println("\n=== RECEIVER LAYER CHANGED ===");
-        DEBUG_SERIAL.print("New Layer: ");
-        DEBUG_SERIAL.println(subscribedLayer);
-        DEBUG_SERIAL.println("Status: Layer saved to EEPROM");
-        DEBUG_SERIAL.println("==============================\n");
-        
-        // Broadcast new layer info to senders
-        sendReceiverInfo();
-      }
+      DEBUG_SERIAL.printf("\n[SYSEX] CHANGE_RECEIVER_LAYER received (length=%d, receiverMode=%d, senderMode=%d)\r\n", 
+                         length, receiverModeEnabled ? 1 : 0, senderModeEnabled ? 1 : 0);
+      
       // When received by SENDER via USB MIDI from Bridge
       // Format: F0 7D 11 [mac_encoded(7)] [layer_encoded(19)] F7 = 29 bytes
       // MAC: 6 bytes raw -> 7 bytes encoded
       // Layer: 16 bytes raw -> 19 bytes encoded
-      else if (senderModeEnabled && length >= 29) {
+      // CHECK THIS FIRST (longer message = more specific match)
+      if (senderModeEnabled && length >= 29) {
         // Decode MAC address (7 bytes encoded -> 6 bytes raw)
         uint8_t targetMac[6];
         decode7bit(&data[3], 7, targetMac);
@@ -289,6 +284,23 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         DEBUG_SERIAL.print("  New Layer: '");
         DEBUG_SERIAL.print(newLayer);
         DEBUG_SERIAL.println("'");
+        
+        // Debug: Show all active receivers in table
+        DEBUG_SERIAL.println("  Active receivers in table:");
+        for (int i = 0; i < MAX_RECEIVERS; i++) {
+          if (receiverTable[i].active) {
+            DEBUG_SERIAL.print("    [");
+            DEBUG_SERIAL.print(i);
+            DEBUG_SERIAL.print("] ");
+            for (int j = 0; j < 6; j++) {
+              DEBUG_SERIAL.printf("%02X", receiverTable[i].mac[j]);
+              if (j < 5) DEBUG_SERIAL.print(":");
+            }
+            DEBUG_SERIAL.print(" Layer='");
+            DEBUG_SERIAL.print(receiverTable[i].layer);
+            DEBUG_SERIAL.println("'");
+          }
+        }
 
         bool found = false;
         for (int i = 0; i < MAX_RECEIVERS; i++) {
@@ -322,6 +334,47 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
           DEBUG_SERIAL.println("  ERROR: Receiver not found in active table!\n");
           sendErrorReport(ERROR_RECEIVER_TIMEOUT, targetMac, 6);
         }
+      }
+      // When received by RECEIVER via ESP-NOW from sender
+      // Format: F0 7D 11 [layer] F7 (short message, no encoding)
+      // CHECK THIS LAST (shorter message = less specific match)
+      else if (receiverModeEnabled && length >= 4) {
+        DEBUG_SERIAL.println("\n[CHANGE_RECEIVER_LAYER] Receiver processing layer change...");
+        DEBUG_SERIAL.printf("  Message length: %d bytes\r\n", length);
+        DEBUG_SERIAL.print("  Raw data: ");
+        for (int i = 0; i < length; i++) {
+          DEBUG_SERIAL.printf("%02X ", data[i]);
+        }
+        DEBUG_SERIAL.println();
+        
+        // Short format: F0 7D 11 [layer] F7 (broadcast to all receivers on sender)
+        // This is the format sent by the sender via ESP-NOW
+        int layerLen = min<int>(length - 4, MAX_LAYER_LENGTH - 1);
+        char newLayer[MAX_LAYER_LENGTH];
+        memcpy(newLayer, &data[3], layerLen);
+        newLayer[layerLen] = '\0';
+        
+        DEBUG_SERIAL.print("  Extracted layer (len=");
+        DEBUG_SERIAL.print(layerLen);
+        DEBUG_SERIAL.print("): '");
+        DEBUG_SERIAL.print(newLayer);
+        DEBUG_SERIAL.println("'");
+        
+        // Update subscribed layer
+        strncpy(subscribedLayer, newLayer, MAX_LAYER_LENGTH);
+        subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
+        
+        // Save to NVS
+        saveLayerToEEPROM(subscribedLayer);
+        
+        DEBUG_SERIAL.println("\n=== RECEIVER LAYER CHANGED ===");
+        DEBUG_SERIAL.print("New Layer: ");
+        DEBUG_SERIAL.println(subscribedLayer);
+        DEBUG_SERIAL.println("Status: Layer saved to EEPROM");
+        DEBUG_SERIAL.println("==============================\n");
+        
+        // Broadcast new layer info to senders
+        sendReceiverInfo();
       }
       break;
 

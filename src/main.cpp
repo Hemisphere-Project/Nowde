@@ -52,6 +52,10 @@ void configureUsbDescriptors() {
   esp_efuse_mac_get_default(mac);
   
   // Create product name: "Nowde 1.0 - DDEEFF" (last 3 bytes of MAC)
+  // NOTE: macOS caches MIDI device names. To clear cache after firmware update:
+  //   sudo rm -rf ~/Library/Preferences/com.apple.audio.midi*
+  //   sudo killall coreaudiod
+  //   (Then unplug/replug device or restart Mac)
   char productName[32];
   snprintf(productName, sizeof(productName), "Nowde %s - %02X%02X%02X", 
            NOWDE_VERSION, mac[3], mac[4], mac[5]);
@@ -142,15 +146,18 @@ void setup() {
   logDeviceInfo();
 
   String savedLayer = loadLayerFromEEPROM();
-  if (savedLayer.length() > 0) {
-    receiverModeEnabled = true;
-    strncpy(subscribedLayer, savedLayer.c_str(), MAX_LAYER_LENGTH);
-    subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
-    DEBUG_SERIAL.println("[INIT] Auto-starting receiver mode");
-    DEBUG_SERIAL.print("  Subscribed Layer: ");
-    DEBUG_SERIAL.println(subscribedLayer);
-    DEBUG_SERIAL.println();
+  // Always enable receiver mode with saved layer or default "-"
+  if (savedLayer.length() == 0 || savedLayer == "") {
+    savedLayer = DEFAULT_RECEIVER_LAYER;
   }
+  
+  receiverModeEnabled = true;
+  strncpy(subscribedLayer, savedLayer.c_str(), MAX_LAYER_LENGTH);
+  subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
+  DEBUG_SERIAL.println("[INIT] Auto-starting receiver mode");
+  DEBUG_SERIAL.print("  Subscribed Layer: ");
+  DEBUG_SERIAL.println(subscribedLayer);
+  DEBUG_SERIAL.println();
 }
 
 void loop() {

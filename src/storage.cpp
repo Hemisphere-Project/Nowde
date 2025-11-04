@@ -24,3 +24,10 @@ String loadLayerFromEEPROM() {
 
   return layer;
 }
+
+void clearEEPROM() {
+  preferences.begin("nowde", false);
+  preferences.clear();
+  preferences.end();
+  DEBUG_SERIAL.println("[EEPROM] All data cleared");
+}
