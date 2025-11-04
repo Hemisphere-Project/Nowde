@@ -257,12 +257,20 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         sendReceiverInfo();
       }
       // When received by SENDER via USB MIDI from Bridge
-      else if (senderModeEnabled && length >= 26) {
+      // Format: F0 7D 11 [mac_encoded(7)] [layer_encoded(19)] F7 = 29 bytes
+      // MAC: 6 bytes raw -> 7 bytes encoded
+      // Layer: 16 bytes raw -> 19 bytes encoded
+      else if (senderModeEnabled && length >= 29) {
+        // Decode MAC address (7 bytes encoded -> 6 bytes raw)
         uint8_t targetMac[6];
-        memcpy(targetMac, &data[3], 6);
+        decode7bit(&data[3], 7, targetMac);
 
+        // Decode layer name (19 bytes encoded -> 16 bytes raw)
+        uint8_t newLayerBytes[MAX_LAYER_LENGTH];
+        decode7bit(&data[10], 19, newLayerBytes);
+        
         char newLayer[MAX_LAYER_LENGTH];
-        memcpy(newLayer, &data[9], MAX_LAYER_LENGTH);
+        memcpy(newLayer, newLayerBytes, MAX_LAYER_LENGTH);
         newLayer[MAX_LAYER_LENGTH - 1] = '\0';
         
         // Remove padding nulls for display

@@ -22,6 +22,8 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_system.h>
+#include <esp_mac.h>
 #include <cstring>
 
 #include "esp_now_handlers.h"
@@ -45,9 +47,21 @@ void printBanner() {
 }
 
 void configureUsbDescriptors() {
+  // Get MAC address for unique device identification using esp_efuse API
+  uint8_t mac[6];
+  esp_efuse_mac_get_default(mac);
+  
+  // Create product name: "Nowde 1.0 - DDEEFF" (last 3 bytes of MAC)
+  char productName[32];
+  snprintf(productName, sizeof(productName), "Nowde %s - %02X%02X%02X", 
+           NOWDE_VERSION, mac[3], mac[4], mac[5]);
+  
+  DEBUG_SERIAL.print("[USB] Setting product name: ");
+  DEBUG_SERIAL.println(productName);
+  
   USB.VID(0x303A);
   USB.PID(0x8000);
-  USB.productName("Nowde 1.0");
+  USB.productName(productName);
   USB.manufacturerName("Hemisphere");
 }
 
