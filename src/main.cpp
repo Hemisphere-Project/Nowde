@@ -25,6 +25,8 @@
 #include <esp_system.h>
 #include <esp_mac.h>
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "esp_now_handlers.h"
 #include "midi.h"
@@ -34,6 +36,10 @@
 #include "sender_mode.h"
 #include "storage.h"
 #include "sysex.h"
+
+// Task handles for multi-core operation
+TaskHandle_t midiTaskHandle = NULL;
+TaskHandle_t espnowTaskHandle = NULL;
 
 namespace {
 
@@ -104,6 +110,101 @@ void logDeviceInfo() {
 
 }  // namespace
 
+// ============= CORE 0 - MIDI/USB TASK (High Priority) =============
+// Runs on Core 0 to ensure USB MIDI is never blocked by ESP-NOW traffic
+void midiTask(void* parameter) {
+  DEBUG_SERIAL.println("[TASK] MIDI task started on Core 0 (high priority)");
+  
+  for (;;) {
+    midiProcess();  // Handle USB MIDI I/O
+    vTaskDelay(pdMS_TO_TICKS(1));  // 1ms - very responsive for MIDI
+  }
+}
+
+// ============= CORE 1 - ESP-NOW/APPLICATION TASK (Normal Priority) =============
+// Runs on Core 1 for all ESP-NOW and application logic
+void espnowTask(void* parameter) {
+  DEBUG_SERIAL.println("[TASK] ESP-NOW task started on Core 1 (normal priority)");
+  
+  unsigned long lastSenderBeacon = 0;
+  unsigned long lastBridgeReport = 0;
+  unsigned long nextReceiverBeacon = 0;
+  
+  for (;;) {
+    unsigned long now = millis();
+
+    // Sender mode operations
+    if (senderModeEnabled) {
+      if (now - lastSenderBeacon >= SENDER_BEACON_INTERVAL_MS) {
+        lastSenderBeacon = now;
+        sendSenderBeacon();
+      }
+
+      cleanupReceiverTable();
+
+      if (now - lastBridgeReport >= BRIDGE_REPORT_INTERVAL_MS) {
+        lastBridgeReport = now;
+        reportReceiversToBridge();
+      }
+      
+      // Process delayed packets for RF simulation
+      if (rfSimulationEnabled) {
+        for (int i = 0; i < MAX_DELAYED_PACKETS; i++) {
+          if (delayedPackets[i].active && now >= delayedPackets[i].sendTime) {
+            esp_now_send(delayedPackets[i].receiverMac, 
+                        reinterpret_cast<uint8_t*>(&delayedPackets[i].packet), 
+                        sizeof(MediaSyncPacket));
+            delayedPackets[i].active = false;
+          }
+        }
+      }
+    }
+
+    // Receiver mode operations
+    if (receiverModeEnabled) {
+      if (now >= nextReceiverBeacon) {
+        sendReceiverInfo();
+        nextReceiverBeacon = now + RECEIVER_BEACON_INTERVAL_MS + random(0, 200);
+      }
+
+      cleanupSenderTable();
+
+      // Check for link lost condition
+      if (mediaSyncState.currentState == 1 && !mediaSyncState.linkLost) {
+        if ((now - mediaSyncState.lastSyncTime) > LINK_LOST_TIMEOUT_MS) {
+          mediaSyncState.linkLost = true;
+          DEBUG_SERIAL.println("[MEDIA SYNC] LINK LOST - no sync packets received");
+          
+          if (mediaSyncState.stopOnLinkLost) {
+            DEBUG_SERIAL.println("[MEDIA SYNC] Stopping MTC clock and sending CC#100=0");
+            mediaSyncState.currentState = 0;
+            midiSendCC100(0);
+            mediaSyncState.lastSentIndex = 0;
+          } else {
+            DEBUG_SERIAL.println("[MEDIA SYNC] Continuing in freewheel mode indefinitely");
+          }
+        }
+      }
+
+      // Continuous MTC clock generation when playing
+      if (mediaSyncState.currentState == 1) {
+        // Calculate current position based on local clock
+        unsigned long localElapsed = now - mediaSyncState.localClockStartTime;
+        uint32_t currentPositionMs = mediaSyncState.currentPositionMs + localElapsed;
+
+        // Send MTC at configured framerate
+        if (now - mediaSyncState.lastMTCUpdateTime >= (1000 / MTC_FRAMERATE)) {
+          midiSendTimeCode(currentPositionMs);
+          mediaSyncState.lastMTCUpdateTime = now;
+        }
+      }
+    }
+
+    meshClock.loop();
+    vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
+  }
+}
+
 void setup() {
   DEBUG_SERIAL.begin(115200);
   delay(500);
@@ -159,79 +260,36 @@ void setup() {
   DEBUG_SERIAL.print("  Subscribed Layer: ");
   DEBUG_SERIAL.println(subscribedLayer);
   DEBUG_SERIAL.println();
+  
+  // Create MIDI task on Core 0 with high priority (configMAX_PRIORITIES - 1)
+  // Stack: 4096 bytes, Priority: 24 (high), Core: 0
+  xTaskCreatePinnedToCore(
+    midiTask,           // Task function
+    "MIDI_Task",        // Task name
+    4096,               // Stack size (bytes)
+    NULL,               // Parameters
+    configMAX_PRIORITIES - 1,  // High priority (24 on ESP32)
+    &midiTaskHandle,    // Task handle
+    0                   // Core 0 - dedicated to USB/MIDI
+  );
+  DEBUG_SERIAL.println("[INIT] MIDI task created on Core 0");
+  
+  // Create ESP-NOW task on Core 1 with normal priority
+  // Stack: 8192 bytes, Priority: 10 (normal), Core: 1
+  xTaskCreatePinnedToCore(
+    espnowTask,         // Task function
+    "ESPNOW_Task",      // Task name
+    8192,               // Stack size (bytes) - larger for ESP-NOW operations
+    NULL,               // Parameters
+    10,                 // Normal priority
+    &espnowTaskHandle,  // Task handle
+    1                   // Core 1 - Arduino default core
+  );
+  DEBUG_SERIAL.println("[INIT] ESP-NOW task created on Core 1");
 }
 
 void loop() {
-  unsigned long now = millis();
-
-  midiProcess();
-
-  if (senderModeEnabled) {
-    if (now - lastSenderBeacon >= SENDER_BEACON_INTERVAL_MS) {
-      lastSenderBeacon = now;
-      sendSenderBeacon();
-    }
-
-    cleanupReceiverTable();
-
-    if (now - lastBridgeReport >= BRIDGE_REPORT_INTERVAL_MS) {
-      lastBridgeReport = now;
-      reportReceiversToBridge();
-    }
-    
-    // Process delayed packets for RF simulation
-    if (rfSimulationEnabled) {
-      for (int i = 0; i < MAX_DELAYED_PACKETS; i++) {
-        if (delayedPackets[i].active && now >= delayedPackets[i].sendTime) {
-          esp_now_send(delayedPackets[i].receiverMac, 
-                      reinterpret_cast<uint8_t*>(&delayedPackets[i].packet), 
-                      sizeof(MediaSyncPacket));
-          delayedPackets[i].active = false;
-        }
-      }
-    }
-  }
-
-  if (receiverModeEnabled) {
-    static unsigned long nextBeacon = 0;
-    if (now >= nextBeacon) {
-      sendReceiverInfo();
-      nextBeacon = now + RECEIVER_BEACON_INTERVAL_MS + random(0, 200);
-    }
-
-    cleanupSenderTable();
-
-    // Check for link lost condition
-    if (mediaSyncState.currentState == 1 && !mediaSyncState.linkLost) {
-      if ((now - mediaSyncState.lastSyncTime) > LINK_LOST_TIMEOUT_MS) {
-        mediaSyncState.linkLost = true;
-        DEBUG_SERIAL.println("[MEDIA SYNC] LINK LOST - no sync packets received");
-        
-        if (mediaSyncState.stopOnLinkLost) {
-          DEBUG_SERIAL.println("[MEDIA SYNC] Stopping MTC clock and sending CC#100=0");
-          mediaSyncState.currentState = 0;
-          midiSendCC100(0);
-          mediaSyncState.lastSentIndex = 0;
-        } else {
-          DEBUG_SERIAL.println("[MEDIA SYNC] Continuing in freewheel mode indefinitely");
-        }
-      }
-    }
-
-    // Continuous MTC clock generation when playing
-    if (mediaSyncState.currentState == 1) {
-      // Calculate current position based on local clock
-      unsigned long localElapsed = now - mediaSyncState.localClockStartTime;
-      uint32_t currentPositionMs = mediaSyncState.currentPositionMs + localElapsed;
-
-      // Send MTC at configured framerate
-      if (now - mediaSyncState.lastMTCUpdateTime >= (1000 / MTC_FRAMERATE)) {
-        midiSendTimeCode(currentPositionMs);
-        mediaSyncState.lastMTCUpdateTime = now;
-      }
-    }
-  }
-
-  meshClock.loop();
-  delay(10);
+  // Empty - all work now done in FreeRTOS tasks
+  // Arduino loop() runs on Core 1 but we don't need it
+  vTaskDelay(portMAX_DELAY);  // Sleep forever
 }

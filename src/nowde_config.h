@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "1.1"
+#define NOWDE_VERSION "1.2"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -114,5 +114,5 @@ struct MediaSyncState {
 };
 
 constexpr uint8_t MTC_FRAMERATE = 30;
-constexpr uint32_t LINK_LOST_TIMEOUT_MS = 3000;
+constexpr uint32_t LINK_LOST_TIMEOUT_MS = 10000;  // 10 seconds - increased tolerance for temporary sync gaps
 constexpr uint32_t CLOCK_DESYNC_THRESHOLD_MS = 200;

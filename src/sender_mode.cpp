@@ -32,8 +32,8 @@ void cleanupReceiverTable() {
         DEBUG_SERIAL.println();
       }
       
-      // Completely remove after 30 seconds (allows reconnection window)
-      if (timeSinceLastSeen > 30000) {
+      // Completely remove after 10 seconds (reduced from 30s to quickly free slots)
+      if (timeSinceLastSeen > 10000) {
         DEBUG_SERIAL.println("\n[CLEANUP] Receiver removed from table");
         DEBUG_SERIAL.print("  MAC: ");
         for (int j = 0; j < 6; j++) {

@@ -1,6 +1,7 @@
 #include "sysex.h"
 
 #include <cstring>
+#include <algorithm>
 
 #include <esp_now.h>
 #include <esp_system.h>
@@ -328,9 +329,9 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 
         int sentCount = 0;
         for (int i = 0; i < MAX_RECEIVERS; i++) {
-          // Send to ALL active receivers on matching layer, regardless of connected status
-          // This ensures stopped state packets reach receivers even if they stopped sending info
-          if (receiverTable[i].active &&
+          // Only send to CONNECTED receivers on matching layer
+          // Disconnected receivers (not sending info) are skipped to prevent blocking
+          if (receiverTable[i].active && receiverTable[i].connected &&
               strncmp(receiverTable[i].layer, targetLayer, MAX_LAYER_LENGTH) == 0) {
             
             if (!rfSimulationEnabled) {
@@ -622,9 +623,19 @@ void sendConfigState() {
 }
 
 void sendRunningState() {
-  // Format: F0 7D 22 [uptimeMs(4,encoded:5)] [meshSynced(1)] [numReceivers(1)]
-  //         For each receiver: [receiverData(36 bytes, encoded:42)]
-  //         F7
+  // Throttle to prevent sending too frequently (max 2Hz)
+  static unsigned long lastSendTime = 0;
+  unsigned long now = millis();
+  if (now - lastSendTime < 500) {  // Min 500ms between sends
+    DEBUG_SERIAL.println("[RUNNING_STATE] Throttled - too soon since last send");
+    return;
+  }
+  lastSendTime = now;
+  
+  // Format per chunk: F0 7D 22 [uptimeMs(4,encoded:5)] [meshSynced(1)]
+  //   [totalReceivers(1)] [chunkIndex(1)] [chunkCount(1)] [chunkReceivers(1)]
+  //   For each receiver in this chunk: [receiverData(36 bytes, encoded:42)]
+  //   F7
   // All multi-byte fields are 7-bit encoded to prevent 0x80-0xFF bytes in data
   
   uint8_t rawData[256];  // Raw 8-bit data buffer
@@ -632,117 +643,147 @@ void sendRunningState() {
   int rawIdx = 0;
   int msgIdx = 0;
   
-  // Build header
-  message[msgIdx++] = SYSEX_START;
-  message[msgIdx++] = SYSEX_MANUFACTURER_ID;
-  message[msgIdx++] = SYSEX_CMD_RUNNING_STATE;
-  
-  // Build raw uptime (4 bytes, big-endian)
-  unsigned long uptime = millis();
-  rawData[rawIdx++] = (uptime >> 24) & 0xFF;
-  rawData[rawIdx++] = (uptime >> 16) & 0xFF;
-  rawData[rawIdx++] = (uptime >> 8) & 0xFF;
-  rawData[rawIdx++] = uptime & 0xFF;
-  
-  // Encode and append uptime (4 bytes -> 5 bytes encoded)
-  msgIdx += encode7bit(rawData, rawIdx, &message[msgIdx]);
-  rawIdx = 0;  // Reset for next field
-  
-  // Mesh clock synced (1 byte, safe as-is since 0 or 1)
-  SyncState syncState = meshClock.getSyncState();
-  bool synced = (syncState == SyncState::SYNCED);
-  message[msgIdx++] = synced ? 1 : 0;
-  
-  // Count active receivers
+  // Take snapshot of receiver table to avoid race conditions
+  // (table can be modified by ESP-NOW callbacks during serialization)
+  ReceiverEntry snapshot[MAX_RECEIVERS];
   uint8_t numActive = 0;
+  
+  // Debug: log receiver table state
+  // Build snapshot of active AND connected receivers only
+  // (skip disconnected receivers waiting for cleanup - they shouldn't appear in Bridge GUI)
   for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active) {
+    if (receiverTable[i].active && receiverTable[i].connected) {
+      snapshot[numActive] = receiverTable[i];
       numActive++;
     }
   }
   
-  message[msgIdx++] = numActive;  // Safe as-is (typically small number)
-  
-  // Add each receiver's data (encoded)
-  for (int i = 0; i < MAX_RECEIVERS; i++) {
-    if (receiverTable[i].active) {
+  const uint8_t RECEIVERS_PER_CHUNK = 1;
+  uint8_t chunkCount = (numActive == 0) ? 1 : static_cast<uint8_t>((numActive + RECEIVERS_PER_CHUNK - 1) / RECEIVERS_PER_CHUNK);
+  unsigned long uptime = millis();
+  SyncState syncState = meshClock.getSyncState();
+  bool synced = (syncState == SyncState::SYNCED);
+
+  // Only log summary when numActive changes or every 10 seconds
+  static unsigned long lastLogTime = 0;
+  static uint8_t lastLogCount = 0xFF;
+  if (numActive != lastLogCount || (millis() - lastLogTime) > 10000) {
+    DEBUG_SERIAL.printf("[RUNNING_STATE] %d active receiver(s), sending %d chunk(s)\r\n", numActive, chunkCount);
+    lastLogTime = millis();
+    lastLogCount = numActive;
+  }
+
+  for (uint8_t chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+    int startIdx = chunkIndex * RECEIVERS_PER_CHUNK;
+    int remaining = numActive - startIdx;
+  uint8_t chunkReceivers = (remaining > 0)
+                 ? static_cast<uint8_t>(std::min<int>(RECEIVERS_PER_CHUNK, remaining))
+                 : 0;
+
+    msgIdx = 0;
+    rawIdx = 0;
+
+    // Build header
+    message[msgIdx++] = SYSEX_START;
+    message[msgIdx++] = SYSEX_MANUFACTURER_ID;
+    message[msgIdx++] = SYSEX_CMD_RUNNING_STATE;
+
+    // Encode uptime once per chunk so Bridge can correlate packets
+    rawData[rawIdx++] = (uptime >> 24) & 0xFF;
+    rawData[rawIdx++] = (uptime >> 16) & 0xFF;
+    rawData[rawIdx++] = (uptime >> 8) & 0xFF;
+    rawData[rawIdx++] = uptime & 0xFF;
+    msgIdx += encode7bit(rawData, rawIdx, &message[msgIdx]);
+    rawIdx = 0;
+
+    // Metadata
+    message[msgIdx++] = synced ? 1 : 0;     // Mesh clock sync state
+    message[msgIdx++] = numActive;          // Total receivers in table
+    message[msgIdx++] = chunkIndex;         // Current chunk index (0-based)
+    message[msgIdx++] = chunkCount;         // Total number of chunks
+    message[msgIdx++] = chunkReceivers;     // Receivers included in this chunk
+
+    // Encode receiver data for this chunk
+    for (int i = 0; i < chunkReceivers; i++) {
+      const ReceiverEntry& entry = snapshot[startIdx + i];
+
       rawIdx = 0;
-      
-      // MAC (6 bytes)
-      memcpy(&rawData[rawIdx], receiverTable[i].mac, 6);
+      memcpy(&rawData[rawIdx], entry.mac, 6);
       rawIdx += 6;
-      
-      // Layer (16 bytes, padded with nulls)
-      memcpy(&rawData[rawIdx], receiverTable[i].layer, MAX_LAYER_LENGTH);
+
+      memcpy(&rawData[rawIdx], entry.layer, MAX_LAYER_LENGTH);
       rawIdx += MAX_LAYER_LENGTH;
-      
-      // Version (8 bytes, padded with nulls)
-      memcpy(&rawData[rawIdx], receiverTable[i].version, MAX_VERSION_LENGTH);
+
+      memcpy(&rawData[rawIdx], entry.version, MAX_VERSION_LENGTH);
       rawIdx += MAX_VERSION_LENGTH;
-      
-      // Last seen (4 bytes, big-endian milliseconds ago)
-      unsigned long lastSeenMs = millis() - receiverTable[i].lastSeen;
+
+      unsigned long lastSeenMs = millis() - entry.lastSeen;
       rawData[rawIdx++] = (lastSeenMs >> 24) & 0xFF;
       rawData[rawIdx++] = (lastSeenMs >> 16) & 0xFF;
       rawData[rawIdx++] = (lastSeenMs >> 8) & 0xFF;
       rawData[rawIdx++] = lastSeenMs & 0xFF;
-      
-      // Active (1 byte)
-      rawData[rawIdx++] = 1;
-      
-      // Media index (1 byte) - current playing media index (0 = stopped)
-      rawData[rawIdx++] = receiverTable[i].mediaIndex;
-      
-      // Encode receiver data (36 bytes -> 42 bytes encoded)
-      msgIdx += encode7bit(rawData, rawIdx, &message[msgIdx]);
-    }
-  }
-  
-  message[msgIdx++] = SYSEX_END;
-  int idx = msgIdx;
-  
-  // Send via USB MIDI (chunk into packets)
-  int pos = 0;
-  while (pos < idx) {
-    midiEventPacket_t packet;
-    memset(&packet, 0, sizeof(packet));
-    
-    // Check if this packet will contain the end byte (0xF7)
-    bool hasEnd = false;
-    int endPos = -1;
-    for (int i = 0; i < 3 && (pos + i) < idx; i++) {
-      if (message[pos + i] == SYSEX_END) {
-        hasEnd = true;
-        endPos = i;
-        break;
+
+      rawData[rawIdx++] = 1;  // Active flag
+      rawData[rawIdx++] = entry.mediaIndex;
+
+      int encodedLen = encode7bit(rawData, rawIdx, &message[msgIdx]);
+      if (msgIdx + encodedLen >= 512) {
+        DEBUG_SERIAL.printf("[RUNNING_STATE] ERROR: Buffer overflow in chunk %d (msgIdx=%d, encodedLen=%d)\r\n",
+                            chunkIndex, msgIdx, encodedLen);
+        return;
       }
+      msgIdx += encodedLen;
     }
-    
-    if (hasEnd) {
-      if (endPos == 0) {
-        packet.header = 0x05;
-        packet.byte1 = message[pos++];
-        packet.byte2 = 0;
-        packet.byte3 = 0;
-      } else if (endPos == 1) {
-        packet.header = 0x06;
-        packet.byte1 = message[pos++];
-        packet.byte2 = message[pos++];
-        packet.byte3 = 0;
+
+    message[msgIdx++] = SYSEX_END;
+    int totalLen = msgIdx;
+
+    // Send via USB MIDI (chunk into packets)
+    int pos = 0;
+    while (pos < totalLen) {
+      midiEventPacket_t packet;
+      memset(&packet, 0, sizeof(packet));
+
+      bool hasEnd = false;
+      int endPos = -1;
+      for (int i = 0; i < 3 && (pos + i) < totalLen; i++) {
+        if (message[pos + i] == SYSEX_END) {
+          hasEnd = true;
+          endPos = i;
+          break;
+        }
+      }
+
+      if (hasEnd) {
+        if (endPos == 0) {
+          packet.header = 0x05;
+          packet.byte1 = message[pos];
+          pos++;
+          packet.byte2 = 0;
+          packet.byte3 = 0;
+        } else if (endPos == 1) {
+          packet.header = 0x06;
+          packet.byte1 = message[pos];
+          packet.byte2 = message[pos + 1];
+          pos += 2;
+          packet.byte3 = 0;
+        } else {
+          packet.header = 0x07;
+          packet.byte1 = message[pos];
+          packet.byte2 = message[pos + 1];
+          packet.byte3 = message[pos + 2];
+          pos += 3;
+        }
       } else {
-        packet.header = 0x07;
-        packet.byte1 = message[pos++];
-        packet.byte2 = message[pos++];
-        packet.byte3 = message[pos++];
+        packet.header = 0x04;
+        packet.byte1 = message[pos];
+        pos++;
+        packet.byte2 = (pos < totalLen) ? message[pos++] : 0;
+        packet.byte3 = (pos < totalLen) ? message[pos++] : 0;
       }
-    } else {
-      packet.header = 0x04;
-      packet.byte1 = message[pos++];
-      packet.byte2 = (pos < idx) ? message[pos++] : 0;
-      packet.byte3 = (pos < idx) ? message[pos++] : 0;
+
+      midiWritePacket(packet);
     }
-    
-    midiWritePacket(packet);
   }
 }
 

@@ -5,9 +5,11 @@
 #include "sysex.h"
 
 namespace {
-uint8_t sysexBuffer[128];
-uint8_t sysexIndex = 0;
+constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
+uint8_t sysexBuffer[SYSEX_BUFFER_SIZE];
+size_t sysexIndex = 0;
 bool inSysex = false;
+bool sysexOverflow = false;
 }
 
 void midiInit() {
@@ -88,8 +90,10 @@ void midiProcess() {
         if (inSysex) {
           const uint8_t bytes[3] = {packet.byte1, packet.byte2, packet.byte3};
           for (int i = 0; i < dataBytes; i++) {
-            if (sysexIndex < sizeof(sysexBuffer)) {
+            if (sysexIndex < SYSEX_BUFFER_SIZE) {
               sysexBuffer[sysexIndex++] = bytes[i];
+            } else {
+              sysexOverflow = true;  // Keep reading so we can resync at F7
             }
             if (bytes[i] == SYSEX_END) {
               // Only log SysEx for non-repetitive messages (to reduce clutter)
@@ -99,16 +103,21 @@ void midiProcess() {
                                    (sysexBuffer[2] == SYSEX_CMD_MEDIA_SYNC || 
                                     sysexBuffer[2] == SYSEX_CMD_QUERY_RUNNING_STATE ||
                                     sysexBuffer[2] == 0x06));  // OTA_DATA
-              if (!isRepetitive) {
+              if (!isRepetitive && !sysexOverflow) {
                 DEBUG_SERIAL.print("[SYSEX RX] ");
                 for (int j = 0; j < sysexIndex; j++) {
                   DEBUG_SERIAL.printf("%02X ", sysexBuffer[j]);
                 }
                 DEBUG_SERIAL.printf("(%d bytes)\r\n", sysexIndex);
               }
-              handleSysExMessage(sysexBuffer, sysexIndex);
+              if (sysexOverflow) {
+                DEBUG_SERIAL.printf("[SYSEX RX] WARNING: SysEx overflow (len>%d), discarding message\r\n", SYSEX_BUFFER_SIZE);
+              } else {
+                handleSysExMessage(sysexBuffer, sysexIndex);
+              }
               inSysex = false;
               sysexIndex = 0;
+              sysexOverflow = false;
               break;
             }
           }
