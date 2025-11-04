@@ -245,11 +245,15 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       if (otaInProgress) {
         DEBUG_SERIAL.printf("\n[OTA END] Finalizing firmware (%u bytes in %lu ms)\r\n",
                            otaReceivedSize, millis() - otaStartTime);
+        DEBUG_SERIAL.printf("[OTA END] Expected: %u bytes, Received: %u bytes\r\n",
+                           otaTotalSize, otaReceivedSize);
         
         // Validate that we received all expected data
         if (otaReceivedSize != otaTotalSize) {
           DEBUG_SERIAL.printf("[OTA END] Size mismatch: received %u, expected %u\r\n",
                              otaReceivedSize, otaTotalSize);
+          DEBUG_SERIAL.printf("[OTA END] Difference: %d bytes\r\n",
+                             (int32_t)otaReceivedSize - (int32_t)otaTotalSize);
           Update.abort();
           otaInProgress = false;
           sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
