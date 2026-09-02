@@ -14,14 +14,14 @@
 #include "sender_mode.h"
 #include "storage.h"
 
-// OTA state tracking
-static bool otaInProgress = false;
+// OTA state tracking (otaInProgress lives in nowde_state, the UI reads it)
 static size_t otaTotalSize = 0;
 static size_t otaReceivedSize = 0;
 static uint32_t otaStartTime = 0;
 
 // Forward declarations for helper functions
 void sendHello();
+void sendSysExBytes(const uint8_t* message, int len);
 void sendConfigState();
 void sendRunningState();
 void sendErrorReport(uint8_t errorCode, const uint8_t* context, uint8_t contextLength);
@@ -108,19 +108,21 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 
   switch (command) {
     case SYSEX_CMD_QUERY_CONFIG:
-      // Enable sender mode if not already active
-      if (!senderModeEnabled) {
+      // v1.2 handshake: a legacy node becomes a sender here. A resolved slave never does
+      // (its host only wants HELLO to learn the role); a master already is one.
+      if (!senderModeEnabled && nodeRole != NOWDE_ROLE_SLAVE) {
         senderModeEnabled = true;
         DEBUG_SERIAL.println("\n=== SENDER MODE ACTIVATED ===");
         DEBUG_SERIAL.println("Received: QUERY_CONFIG (0x01)");
         DEBUG_SERIAL.println("Status: Broadcasting ESP-NOW beacons");
         DEBUG_SERIAL.println("=============================\n");
       } else {
-        DEBUG_SERIAL.println("[QUERY_CONFIG] Received from Bridge");
+        DEBUG_SERIAL.println("[QUERY_CONFIG] Received from host");
       }
       
       // Always send HELLO first (so Bridge knows we're alive/ready)
       // then send current config state
+      hostResumed = false;
       sendHello();
       delay(50);  // Delay between messages to ensure Bridge processes them separately
       sendConfigState();
@@ -129,8 +131,8 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
     case SYSEX_CMD_PUSH_FULL_CONFIG:
       // Format: F0 7D 02 [rfSimEnabled(1)] [rfSimMaxDelayHi(1)] [rfSimMaxDelayLo(1)] F7
       if (length >= 6) {
-        // Enable sender mode if not already active
-        if (!senderModeEnabled) {
+        // Enable sender mode if not already active (never on a resolved slave)
+        if (!senderModeEnabled && nodeRole != NOWDE_ROLE_SLAVE) {
           senderModeEnabled = true;
           DEBUG_SERIAL.println("\n=== SENDER MODE ACTIVATED ===");
           DEBUG_SERIAL.println("Received: PUSH_FULL_CONFIG (0x02)");
@@ -156,6 +158,13 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       break;
 
     case SYSEX_CMD_QUERY_RUNNING_STATE:
+      // v2: a host that just (re)appeared gets a HELLO first, so it can read our role
+      // without QUERY_CONFIG (which would turn a legacy node into a sender).
+      if (hostResumed) {
+        hostResumed = false;
+        sendHello();
+        delay(20);
+      }
       if (senderModeEnabled) {
         // Silently send running state (queried every 1s by Bridge)
         sendRunningState();
@@ -332,7 +341,7 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
           // Only send to CONNECTED receivers on matching layer
           // Disconnected receivers (not sending info) are skipped to prevent blocking
           if (receiverTable[i].active && receiverTable[i].connected &&
-              strncmp(receiverTable[i].layer, targetLayer, MAX_LAYER_LENGTH) == 0) {
+              layerMatches(receiverTable[i].layer, targetLayer)) {
             
             if (!rfSimulationEnabled) {
               // Normal send - no delay
@@ -491,6 +500,50 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_ROLE:
+      // v2 — Format: F0 7D 08 [role] F7 ; role 0 = slave, 1 = master, 0x7F = auto (board decides)
+      if (length >= 5) {
+        uint8_t role = data[3];
+        if (role != NOWDE_ROLE_SLAVE && role != NOWDE_ROLE_MASTER && role != NOWDE_ROLE_AUTO) {
+          sendErrorReport(ERROR_CONFIG_INVALID, &role, 1);
+          break;
+        }
+        storedRole = role;
+        saveRoleToEEPROM(role);
+        uint8_t resolved = role;
+        if (role == NOWDE_ROLE_AUTO) {
+          resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
+                   : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
+                   : NOWDE_ROLE_LEGACY;
+        }
+        applyRole(resolved);
+        DEBUG_SERIAL.printf("[SET_ROLE] stored=%u resolved=%u\r\n", role, resolved);
+        sendHello();
+        delay(50);
+        sendConfigState();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
+    case SYSEX_CMD_SET_LOCAL_LAYER:
+      // v2 — Format: F0 7D 09 [layer ascii, 1..15 bytes] F7 ; sets THIS node's subscribed layer
+      if (length >= 5) {
+        int layerLen = min<int>(length - 4, MAX_LAYER_LENGTH - 1);
+        char newLayer[MAX_LAYER_LENGTH];
+        memcpy(newLayer, &data[3], layerLen);
+        newLayer[layerLen] = '\0';
+        strncpy(subscribedLayer, newLayer, MAX_LAYER_LENGTH);
+        subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
+        saveLayerToEEPROM(subscribedLayer);
+        DEBUG_SERIAL.printf("[SET_LOCAL_LAYER] '%s'\r\n", subscribedLayer);
+        sendReceiverInfo();
+        sendConfigState();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
     default:
       DEBUG_SERIAL.printf("[SYSEX] Unknown command: 0x%02X\r\n", command);
       sendErrorReport(ERROR_SYSEX_PARSE_ERROR, &command, 1);
@@ -501,8 +554,8 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 // ============= HELPER FUNCTIONS =============
 
 void sendHello() {
-  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] F7
-  // Sent on boot to signal sender restart
+  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)] F7
+  // Sent on boot and on QUERY_CONFIG / SET_ROLE. role/board are v2 trailing fields.
   
   uint8_t rawData[16];
   uint8_t message[64];
@@ -529,6 +582,11 @@ void sendHello() {
   
   // Boot reason (1 byte - ESP32 reset reason, already 7-bit safe)
   message[msgIdx++] = esp_reset_reason() & 0x7F;
+
+  // v2 trailer: resolved role (0 slave, 1 master, 2 legacy) and board id.
+  // Older parsers (MillluBridge) only check the minimum length and ignore the rest.
+  message[msgIdx++] = nodeRole & 0x7F;
+  message[msgIdx++] = boardId & 0x7F;
   
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
@@ -583,43 +641,63 @@ void sendHello() {
   DEBUG_SERIAL.println("[HELLO] Sent to Bridge");
 }
 
+void sendSysExBytes(const uint8_t* message, int len) {
+  // Chunk a complete F0..F7 frame into USB-MIDI packets (CIN 4/5/6/7)
+  int pos = 0;
+  while (pos < len) {
+    midiEventPacket_t packet;
+    memset(&packet, 0, sizeof(packet));
+    int remaining = len - pos;
+    if (remaining > 3) {
+      packet.header = 0x04;
+      packet.byte1 = message[pos];
+      packet.byte2 = message[pos + 1];
+      packet.byte3 = message[pos + 2];
+      pos += 3;
+    } else if (remaining == 3) {
+      packet.header = 0x07;
+      packet.byte1 = message[pos];
+      packet.byte2 = message[pos + 1];
+      packet.byte3 = message[pos + 2];
+      pos += 3;
+    } else if (remaining == 2) {
+      packet.header = 0x06;
+      packet.byte1 = message[pos];
+      packet.byte2 = message[pos + 1];
+      pos += 2;
+    } else {
+      packet.header = 0x05;
+      packet.byte1 = message[pos];
+      pos += 1;
+    }
+    midiWritePacket(packet);
+  }
+}
+
 void sendConfigState() {
-  // Format: F0 7D 21 [rfSimEnabled] [rfSimMaxDelayHi(7-bit)] [rfSimMaxDelayLo(7-bit)] F7
-  uint8_t message[7];
-  message[0] = SYSEX_START;
-  message[1] = SYSEX_MANUFACTURER_ID;
-  message[2] = SYSEX_CMD_CONFIG_STATE;
-  message[3] = rfSimulationEnabled ? 1 : 0;
+  // Format: F0 7D 21 [rfSimEnabled] [rfSimMaxDelayHi(7-bit)] [rfSimMaxDelayLo(7-bit)]
+  //         [role(1)] [board(1)] [layerLen(1)] [layer ascii...] F7
+  // The first 7 bytes are the v1.2 frame; the rest is a v2 trailer older parsers skip.
+  uint8_t message[32];
+  int idx = 0;
+  message[idx++] = SYSEX_START;
+  message[idx++] = SYSEX_MANUFACTURER_ID;
+  message[idx++] = SYSEX_CMD_CONFIG_STATE;
+  message[idx++] = rfSimulationEnabled ? 1 : 0;
   // Encode as two 7-bit bytes (MIDI SysEx compatible, 14-bit range = 0-16383)
-  message[4] = (rfSimMaxDelayMs >> 7) & 0x7F;  // Upper 7 bits
-  message[5] = rfSimMaxDelayMs & 0x7F;         // Lower 7 bits
-  message[6] = SYSEX_END;
-  
-  // Send via USB MIDI (requires chunking into MIDI packets)
-  midiEventPacket_t packet;
-  
-  // First packet: F0 7D 20
-  packet.header = 0x04;  // SysEx start
-  packet.byte1 = message[0];
-  packet.byte2 = message[1];
-  packet.byte3 = message[2];
-  midiWritePacket(packet);
-  
-  // Second packet: data bytes
-  packet.header = 0x04;
-  packet.byte1 = message[3];
-  packet.byte2 = message[4];
-  packet.byte3 = message[5];
-  midiWritePacket(packet);
-  
-  // Third packet: F7 (end)
-  packet.header = 0x05;  // SysEx end (single byte)
-  packet.byte1 = message[6];
-  packet.byte2 = 0;
-  packet.byte3 = 0;
-  midiWritePacket(packet);
-  
-  DEBUG_SERIAL.println("[CONFIG_STATE] Sent to Bridge");
+  message[idx++] = (rfSimMaxDelayMs >> 7) & 0x7F;  // Upper 7 bits
+  message[idx++] = rfSimMaxDelayMs & 0x7F;         // Lower 7 bits
+  message[idx++] = nodeRole & 0x7F;
+  message[idx++] = boardId & 0x7F;
+  int layerLen = strnlen(subscribedLayer, MAX_LAYER_LENGTH - 1);
+  message[idx++] = static_cast<uint8_t>(layerLen);
+  for (int i = 0; i < layerLen; i++) {
+    message[idx++] = subscribedLayer[i] & 0x7F;
+  }
+  message[idx++] = SYSEX_END;
+
+  sendSysExBytes(message, idx);
+  DEBUG_SERIAL.println("[CONFIG_STATE] Sent to host");
 }
 
 void sendRunningState() {

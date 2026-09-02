@@ -5,6 +5,11 @@
 #include <ESPNowMeshClock.h>
 #include "nowde_config.h"
 
+#if defined(NOWDE_BOARD_ATOMS3)
+#include <USBCDC.h>
+extern USBCDC USBSerial;   // composite CDC next to MIDI on the single USB-C
+#endif
+
 extern USBMIDI MIDI;
 extern Preferences preferences;
 extern ESPNowMeshClock meshClock;
@@ -12,6 +17,12 @@ extern ESPNowMeshClock meshClock;
 extern bool senderModeEnabled;
 extern bool receiverModeEnabled;
 extern char subscribedLayer[MAX_LAYER_LENGTH];
+
+// Role: what NVS says (NOWDE_ROLE_SLAVE / MASTER / AUTO) and what it resolved to
+// at boot (SLAVE / MASTER / LEGACY). See nowde_config.h.
+extern uint8_t storedRole;
+extern uint8_t nodeRole;
+extern uint8_t boardId;
 
 extern SenderEntry senderTable[MAX_SENDERS];
 extern ReceiverEntry receiverTable[MAX_RECEIVERS];
@@ -22,6 +33,11 @@ extern unsigned long lastSenderBeacon;
 extern unsigned long lastBridgeReport;
 
 extern MediaSyncState mediaSyncState;
+
+// Host link: last time any USB-MIDI packet came in from the host
+extern unsigned long lastHostRxTime;
+extern bool hostResumed;      // set when the host speaks after a silence; QUERY_RUNNING_STATE answers HELLO once
+extern bool otaInProgress;
 
 // RF Simulation for testing
 extern bool rfSimulationEnabled;
@@ -41,3 +57,9 @@ extern DelayedMediaSyncPacket delayedPackets[MAX_DELAYED_PACKETS];
 bool macEqual(const uint8_t* mac1, const uint8_t* mac2);
 int countActiveSenders();
 int countActiveReceivers();
+int countConnectedReceivers();
+bool hostLinked();
+// A slave subscribed to `subscribed` follows packets tagged `packetLayer`
+bool layerMatches(const char* subscribed, const char* packetLayer);
+// Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node
+void applyRole(uint8_t resolvedRole);

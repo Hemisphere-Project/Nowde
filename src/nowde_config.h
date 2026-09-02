@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "1.2"
+#define NOWDE_VERSION "2.0"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -13,14 +13,67 @@
 #define RECEIVER_BEACON_INTERVAL_MS 1000
 #define SENDER_BEACON_INTERVAL_MS 1000
 #define BRIDGE_REPORT_INTERVAL_MS 500
-#define DEFAULT_RECEIVER_LAYER "-"
+
+// ============= BOARD =============
+// Selected per PlatformIO env with -DNOWDE_BOARD_ATOMS3 (M5Stack AtomS3 / AtomS3 Lite,
+// single native USB-C, composite MIDI + CDC) or nothing (ESP32-S3 DevKitC-1: native USB
+// for MIDI, UART0 for logs — the MillluBridge baseline).
+#if defined(NOWDE_BOARD_ATOMS3)
+  #define NOWDE_BOARD_NAME "atoms3"
+  #define DEBUG_SERIAL USBSerial      // USBCDC instance, see nowde_state.h
+  #define NOWDE_HAS_UI 1
+#else
+  #define NOWDE_BOARD_NAME "devkit"
+  #define DEBUG_SERIAL Serial         // UART0
+  #define NOWDE_HAS_UI 0
+#endif
+
+// Board ids reported in HELLO / CONFIG_STATE
+#define NOWDE_BOARDID_UNKNOWN     0
+#define NOWDE_BOARDID_DEVKIT      1
+#define NOWDE_BOARDID_ATOMS3      2
+#define NOWDE_BOARDID_ATOMS3_LITE 3
+
+// ============= ROLE =============
+// Stored in NVS ("nowde"/"role"). AUTO = decide from the board at boot:
+//   AtomS3 (LCD)      -> master
+//   AtomS3 Lite (LED) -> slave
+//   DevKit / unknown  -> legacy: receiver at boot, sender when the host handshakes (v1.2)
+#define NOWDE_ROLE_SLAVE  0
+#define NOWDE_ROLE_MASTER 1
+#define NOWDE_ROLE_LEGACY 2         // resolved value only, never stored
+#define NOWDE_ROLE_AUTO   0x7F
+#ifndef NOWDE_ROLE_DEFAULT
+  #define NOWDE_ROLE_DEFAULT NOWDE_ROLE_AUTO
+#endif
+
+// ============= LAYERS =============
+// "-" = unassigned (MillluBridge convention, the GUI assigns one).
+// "*" = wildcard: a slave on "*" follows any layer; a master sends to "*" slaves too.
+#define NOWDE_LAYER_UNASSIGNED "-"
+#define NOWDE_LAYER_WILDCARD   "*"
+#ifndef NOWDE_DEFAULT_LAYER
+  #if defined(NOWDE_BOARD_ATOMS3)
+    #define NOWDE_DEFAULT_LAYER NOWDE_LAYER_WILDCARD
+  #else
+    #define NOWDE_DEFAULT_LAYER NOWDE_LAYER_UNASSIGNED
+  #endif
+#endif
+#define DEFAULT_RECEIVER_LAYER NOWDE_DEFAULT_LAYER
+
+// ============= RADIO =============
+#ifndef NOWDE_WIFI_CHANNEL
+  #define NOWDE_WIFI_CHANNEL 1        // every node must sit on the same channel
+#endif
 
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
 
-// ============= LOGGING CONFIGURATION =============
-#define DEBUG_SERIAL Serial
+// ============= HOST LINK =============
+// A host is considered linked while it has sent us anything within this window
+// (HPlayer2 polls QUERY_RUNNING_STATE every 2 s as a keepalive; the Bridge every 1 s).
+#define HOST_LINK_TIMEOUT_MS 5000
 
 // ============= MESH CLOCK SYNC =============
 #define TRANSMISSION_DELAY_US 1300
@@ -38,6 +91,8 @@
 #define SYSEX_CMD_OTA_BEGIN 0x05
 #define SYSEX_CMD_OTA_DATA 0x06
 #define SYSEX_CMD_OTA_END 0x07
+#define SYSEX_CMD_SET_ROLE 0x08          // v2: F0 7D 08 role F7 (0 slave, 1 master, 7F auto)
+#define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10
@@ -62,6 +117,7 @@
 #define ESPNOW_MSG_SENDER_BEACON 0x01
 #define ESPNOW_MSG_RECEIVER_INFO 0x02
 #define ESPNOW_MSG_MEDIA_SYNC 0x03
+#define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.1: reserved (Note/CC relay scheduled on mesh time)
 
 // ============= DATA STRUCTURES =============
 struct SenderBeacon {

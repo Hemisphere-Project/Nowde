@@ -10,6 +10,20 @@ uint8_t sysexBuffer[SYSEX_BUFFER_SIZE];
 size_t sysexIndex = 0;
 bool inSysex = false;
 bool sysexOverflow = false;
+
+struct Smpte {
+  uint8_t frames, seconds, minutes, hours;
+};
+
+Smpte toSmpte(uint32_t positionMs) {
+  uint32_t totalFrames = (positionMs * MTC_FRAMERATE) / 1000;
+  Smpte t;
+  t.frames = totalFrames % MTC_FRAMERATE;
+  t.seconds = (totalFrames / MTC_FRAMERATE) % 60;
+  t.minutes = (totalFrames / (MTC_FRAMERATE * 60)) % 60;
+  t.hours = (totalFrames / (MTC_FRAMERATE * 3600)) % 24;
+  return t;
+}
 }
 
 void midiInit() {
@@ -22,11 +36,7 @@ void midiSendCC100(uint8_t value) {
 }
 
 void midiSendTimeCode(uint32_t positionMs) {
-  uint32_t totalFrames = (positionMs * MTC_FRAMERATE) / 1000;
-  uint8_t frames = totalFrames % MTC_FRAMERATE;
-  uint8_t seconds = (totalFrames / MTC_FRAMERATE) % 60;
-  uint8_t minutes = (totalFrames / (MTC_FRAMERATE * 60)) % 60;
-  uint8_t hours = (totalFrames / (MTC_FRAMERATE * 3600)) % 24;
+  Smpte t = toSmpte(positionMs);
 
   auto sendQuarterFrame = [&](uint8_t piece, uint8_t nibble) {
     midiEventPacket_t packet;
@@ -37,22 +47,55 @@ void midiSendTimeCode(uint32_t positionMs) {
     midiWritePacket(packet);
   };
 
-  sendQuarterFrame(0, frames & 0x0F);
-  sendQuarterFrame(1, (frames >> 4) & 0x01);
-  sendQuarterFrame(2, seconds & 0x0F);
-  sendQuarterFrame(3, (seconds >> 4) & 0x03);
-  sendQuarterFrame(4, minutes & 0x0F);
-  sendQuarterFrame(5, (minutes >> 4) & 0x03);
-  sendQuarterFrame(6, hours & 0x0F);
+  sendQuarterFrame(0, t.frames & 0x0F);
+  sendQuarterFrame(1, (t.frames >> 4) & 0x01);
+  sendQuarterFrame(2, t.seconds & 0x0F);
+  sendQuarterFrame(3, (t.seconds >> 4) & 0x03);
+  sendQuarterFrame(4, t.minutes & 0x0F);
+  sendQuarterFrame(5, (t.minutes >> 4) & 0x03);
+  sendQuarterFrame(6, t.hours & 0x0F);
 
-  uint8_t framerateCode = 3;
-  sendQuarterFrame(7, ((hours >> 4) & 0x01) | (framerateCode << 1));
+  uint8_t framerateCode = 3;  // 30 fps non-drop
+  sendQuarterFrame(7, ((t.hours >> 4) & 0x01) | (framerateCode << 1));
 
   static unsigned long lastMTCLog = 0;
   if (millis() - lastMTCLog > 5000) {
-    DEBUG_SERIAL.printf("[MIDI TX] MTC: %02d:%02d:%02d:%02d (30fps)\r\n", hours, minutes, seconds, frames);
+    DEBUG_SERIAL.printf("[MIDI TX] MTC: %02d:%02d:%02d:%02d (30fps)\r\n", t.hours, t.minutes, t.seconds, t.frames);
     lastMTCLog = millis();
   }
+}
+
+void midiSendFullFrame(uint32_t positionMs) {
+  // Universal real-time SysEx: F0 7F 7F 01 01 hh mm ss ff F7 (hh carries the rate code in bits 5-6)
+  Smpte t = toSmpte(positionMs);
+  const uint8_t msg[10] = {0xF0, 0x7F, 0x7F, 0x01, 0x01,
+                           static_cast<uint8_t>((3 << 5) | (t.hours & 0x1F)),
+                           t.minutes, t.seconds, t.frames, 0xF7};
+  midiEventPacket_t p;
+  p.header = 0x04; p.byte1 = msg[0]; p.byte2 = msg[1]; p.byte3 = msg[2]; midiWritePacket(p);
+  p.header = 0x04; p.byte1 = msg[3]; p.byte2 = msg[4]; p.byte3 = msg[5]; midiWritePacket(p);
+  p.header = 0x04; p.byte1 = msg[6]; p.byte2 = msg[7]; p.byte3 = msg[8]; midiWritePacket(p);
+  p.header = 0x05; p.byte1 = msg[9]; p.byte2 = 0;      p.byte3 = 0;      midiWritePacket(p);
+  DEBUG_SERIAL.printf("[MIDI TX] MTC full-frame %02d:%02d:%02d:%02d\r\n", t.hours, t.minutes, t.seconds, t.frames);
+}
+
+static void sendRealtime(uint8_t status) {
+  midiEventPacket_t p;
+  p.header = 0x0F;  // single-byte system real-time
+  p.byte1 = status;
+  p.byte2 = 0;
+  p.byte3 = 0;
+  midiWritePacket(p);
+}
+
+void midiSendStart() {
+  sendRealtime(0xFA);
+  DEBUG_SERIAL.println("[MIDI TX] Start");
+}
+
+void midiSendStop() {
+  sendRealtime(0xFC);
+  DEBUG_SERIAL.println("[MIDI TX] Stop");
 }
 
 void midiWritePacket(midiEventPacket_t& packet) {
@@ -67,6 +110,10 @@ void midiProcess() {
   midiEventPacket_t packet;
 
   while (midiReadPacket(&packet)) {
+    if (!hostLinked()) {
+      hostResumed = true;       // first packet after a silence: the host may be probing our role
+    }
+    lastHostRxTime = millis();  // anything from the host counts as a heartbeat
     uint8_t cin = packet.header & 0x0F;
 
     if (cin >= 0x4 && cin <= 0x7) {

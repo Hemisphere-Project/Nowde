@@ -35,7 +35,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 |-----|------|-------|--------|
 | `01` | QUERY_CONFIG | `F0 7D 01 F7` | Enables **sender mode** if not active. Node answers `HELLO`, then `CONFIG_STATE` 50 ms later. This is the handshake a host sends on connect. |
 | `02` | PUSH_FULL_CONFIG | `F0 7D 02 rfSim(1) delayHi(1) delayLo(1) F7` | RF-simulation knobs for bench testing (random 0..delay ms added to each media-sync send). 14-bit delay. Enables sender mode. Answers `CONFIG_STATE`. |
-| `03` | QUERY_RUNNING_STATE | `F0 7D 03 F7` | Sender only. Answers one `RUNNING_STATE` frame per known slave (throttled to 2 Hz). |
+| `03` | QUERY_RUNNING_STATE | `F0 7D 03 F7` | Sender: answers one `RUNNING_STATE` frame per known slave (throttled to 2 Hz). *(v2)* If the host had been silent for 5 s, a `HELLO` comes first, whatever the role — this is how a host learns a node's role **without** `QUERY_CONFIG`, which would turn a legacy node into a sender. Silent on a v1.2 receiver, so it doubles as a harmless keepalive. |
 | `04` | ENTER_BOOTLOADER | `F0 7D 04 F7` | Deprecated, no-op. Use OTA. |
 | `05` | OTA_BEGIN | `F0 7D 05 size(4→5) F7` | Sender only. `size` = firmware length, big-endian u32. Starts an `Update` session on the app partition. |
 | `06` | OTA_DATA | `F0 7D 06 data(7-bit) F7` | Decoded chunk ≤ 256 bytes, written in order. Errors abort the session with `ERROR_REPORT`. |
@@ -55,7 +55,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | Cmd | Name | Frame |
 |-----|------|-------|
 | `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. *(v2 appends `role(1) board(1)`; parsers must accept longer frames, the MillluBridge one does.)* |
-| `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes |
+| `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes. *(v2 appends `role(1) board(1) layerLen(1) layer(ASCII…)`.)* |
 | `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(36→42)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)`. Only *connected* slaves are listed. |
 | `23` | OTA_ACK | reserved, unused in v1.2 |
 | `30` | ERROR_REPORT | `F0 7D 30 code(1) ctxLen(1) ctx(≤32) F7`. Codes: `01` CONFIG_INVALID, `02` SYSEX_PARSE_ERROR, `03` ESPNOW_SEND_FAILED, `04` MESH_CLOCK_LOST_SYNC, `05` RECEIVER_TIMEOUT, `FF` UNKNOWN. |
@@ -132,4 +132,27 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling.
 | `MIDI_Task` | 0 | `configMAX_PRIORITIES − 1` | 1 ms | USB-MIDI read / SysEx reassembly (512-byte buffer) |
 | `ESPNOW_Task` | 1 | 10 | 10 ms | beacons, tables, link-lost, MTC generation, `meshClock.loop()` |
 
-NVS namespace `nowde`: `layer` (string). *(v2: `role` u8.)*
+NVS namespace `nowde`: `layer` (string). *(v2: `role` u8 — 0 slave, 1 master, 0x7F auto.)*
+
+## v2 role resolution (boot)
+
+1. `role` from NVS if it is 0 or 1 (`SET_ROLE` stores it).
+2. Else the build's `NOWDE_ROLE_DEFAULT` if forced (`atoms3-master` / `atoms3-slave` envs).
+3. Else the board, detected by M5Unified: AtomS3 (LCD) → **master**, AtomS3 Lite → **slave**,
+   DevKit / unknown → **legacy** (= exact v1.2 behaviour: receiver at boot, sender on `QUERY_CONFIG`).
+
+A resolved **master** enables sender mode at boot and beacons immediately. A resolved
+**slave** never becomes a sender: `QUERY_CONFIG` / `PUSH_FULL_CONFIG` only answer.
+`HELLO` and `CONFIG_STATE` report the resolved role (0 slave, 1 master, 2 legacy) and
+the board id (1 devkit, 2 atoms3, 3 atoms3-lite).
+
+## v2 board UI
+
+- **AtomS3 LCD**, page 0: role banner (coloured like the LED code below), mesh state,
+  slaves / masters seen, host link, layer, media index + position, version + channel.
+  Page 1 (click): board, role source (auto / nvs), MAC, uptime, mesh age, free heap.
+- **AtomS3 Lite LED**: blue booting · purple master without host · yellow blink no
+  peer (master: no slave; slave: no master) · cyan synced idle · green synced playing ·
+  red link lost while playing · orange mesh clock lost · magenta OTA.
+- **Button**: click = next page; hold 3 s = clear NVS (layer + role back to defaults) and
+  reboot. Role changes are SysEx-only on purpose (`SET_ROLE`).

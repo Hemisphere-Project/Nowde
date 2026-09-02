@@ -24,10 +24,11 @@ host (master) ──USB-MIDI──▶ Nowde master ──ESP-NOW mesh──▶ N
                               mesh clock                                    Start/Stop
 ```
 
-Status: **v1.2** is the firmware extracted from MillluBridge, unchanged, in
-production on the AnnaTV player fleet. **v2** (this week, September 2026) adds the
-M5Stack AtomS3 / AtomS3 Lite targets, a board-carried master/slave role and a
-generic MIDI face. See [Roadmap](#roadmap).
+Status: **v1.2** (tag `v1.2.0`) is the firmware extracted from MillluBridge,
+unchanged, in production on the AnnaTV player fleet. **v2.0** (September 2026, this
+branch) adds the M5Stack AtomS3 / AtomS3 Lite target, a board-carried master/slave
+role, the layer wildcard, LCD / LED status and MIDI Start/Stop + full-frame on the
+slave output. See [Roadmap](#roadmap).
 
 ## Roles
 
@@ -38,8 +39,9 @@ generic MIDI face. See [Roadmap](#roadmap).
 
 In v1.2 every node boots as a receiver and becomes a sender when its host sends
 the `QUERY_CONFIG` SysEx handshake (this is what the MillluBridge GUI does). v2
-lets the board carry the role: the AtomS3 build boots as master, the AtomS3 Lite
-build as slave, both overridable from the host and stored in NVS.
+lets the board carry the role: the same `atoms3` binary detects an AtomS3 and boots
+as master, an AtomS3 Lite and boots as slave. A host can override it (`SET_ROLE`,
+stored in NVS) and the DevKit keeps the v1.2 handshake behaviour.
 
 **Layers.** Every slave subscribes to a layer name (16 chars, stored in NVS). The
 master tags each media-sync packet with a layer and only slaves on that layer
@@ -110,8 +112,21 @@ pio run -e esp32-s3-devkitc-1 -t upload      # flash (DevKit: use the UART port)
 pio device monitor -b 115200                 # logs
 ```
 
-Every build copies its binary to `bin/`, which is what the MillluBridge OTA
-uploader consumes.
+Every build copies its binary to `bin/firmware-<env>.bin` (the DevKit env also keeps
+`bin/firmware.bin`, the name the MillluBridge OTA uploader expects).
+
+AtomS3 / AtomS3 Lite (env `atoms3`, one binary for both):
+
+```sh
+pio run -e atoms3 -t upload --upload-port /dev/ttyACM0   # first flash: hold the button
+                                                         # while plugging in (download mode)
+pio device monitor -p /dev/ttyACM0                       # log over the same cable (CDC)
+```
+
+Once the v2 firmware runs, the node enumerates as `Nowde - XXXXXX` with a MIDI port
+and a CDC serial port; re-flashing goes through the CDC with esptool's auto-reset.
+If a build crashes before USB comes up, hold the button while plugging in again.
+`atoms3-master` / `atoms3-slave` are the same build with the role forced.
 
 DevKit notes: flash through the **UART** USB port, plug the **native** USB port
 into the host. If upload fails, hold BOOT while plugging. macOS caches MIDI

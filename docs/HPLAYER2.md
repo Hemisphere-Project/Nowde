@@ -53,11 +53,14 @@ flag that mutes MTC until the next non-zero index.
 
 ## Master leg: the player drives the node
 
-*Nowde v2, HPlayer2 master branch — in progress.* The same interface, when the
-node's `HELLO` reports `role = master` (or when instantiated with `mode='master'`),
-opens the matching MIDI **output** as well and:
+*Nowde v2, HPlayer2 `master` branch.* The same interface opens the matching MIDI
+**output** as well and, in `mode='auto'` (the default), probes the node with
+`QUERY_RUNNING_STATE` every 2 s: a v2 node answers `HELLO` with its role, a v1.2
+receiver stays silent and is assumed to be a slave after 6 s (never `QUERY_CONFIG`
+on an unknown node: that would turn a v1.2 receiver into a sender). Once the role
+is master (or with `mode='master'`) the interface:
 
-1. sends `QUERY_CONFIG` on connect and again on every `HELLO` (node reboot);
+1. sends `QUERY_CONFIG` (the Bridge handshake) and again on every fresh `HELLO` (node reboot);
 2. every 100 ms sends `MEDIA_SYNC` with
    - `index` = the numeric prefix of the current media's file name (`0` when
      stopped or unnumbered; a `nowde-index-default` setting can substitute a fixed

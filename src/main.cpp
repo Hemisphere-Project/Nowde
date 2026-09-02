@@ -1,6 +1,7 @@
 /*
- * MilluBridge - Nowde ESP32 Firmware
- * Copyright (C) 2025 maigre - Hemisphere Project
+ * Nowde - ESP32-S3 sync node firmware
+ * https://github.com/Hemisphere-Project/Nowde
+ * Copyright (C) 2025-2026 maigre - Hemisphere Project
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,6 +37,7 @@
 #include "sender_mode.h"
 #include "storage.h"
 #include "sysex.h"
+#include "ui.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -47,7 +49,8 @@ void printBanner() {
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("═══════════════════════════════════");
   DEBUG_SERIAL.println("      NOWDE ESP-NOW v" NOWDE_VERSION "      ");
-  DEBUG_SERIAL.println("        Hemisphere Project 2025      ");
+  DEBUG_SERIAL.println("        Hemisphere Project 2026      ");
+  DEBUG_SERIAL.println("        board: " NOWDE_BOARD_NAME);
   DEBUG_SERIAL.println("═══════════════════════════════════");
   DEBUG_SERIAL.println();
 }
@@ -179,6 +182,7 @@ void espnowTask(void* parameter) {
             DEBUG_SERIAL.println("[MEDIA SYNC] Stopping MTC clock and sending CC#100=0");
             mediaSyncState.currentState = 0;
             midiSendCC100(0);
+            midiSendStop();
             mediaSyncState.lastSentIndex = 0;
           } else {
             DEBUG_SERIAL.println("[MEDIA SYNC] Continuing in freewheel mode indefinitely");
@@ -201,16 +205,28 @@ void espnowTask(void* parameter) {
     }
 
     meshClock.loop();
+    uiTick();
     vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
   }
 }
 
 void setup() {
-  DEBUG_SERIAL.begin(115200);
+#if defined(NOWDE_BOARD_ATOMS3)
+  // Single USB-C: descriptors first, then CDC + MIDI as one composite device.
+  uiInit();                       // M5Unified: board detection + LCD/LED
+  configureUsbDescriptors();
+  midiInit();
+  DEBUG_SERIAL.begin();           // USBCDC
+  USB.begin();
+  delay(1500);                    // let the host enumerate before we log or HELLO
+#else
+  DEBUG_SERIAL.begin(115200);     // UART0
   delay(500);
+#endif
 
   printBanner();
 
+#if !defined(NOWDE_BOARD_ATOMS3)
   configureUsbDescriptors();
   USB.begin();
   DEBUG_SERIAL.println("[INIT] USB initialized");
@@ -220,8 +236,22 @@ void setup() {
   
   // Wait for USB to fully enumerate before sending HELLO
   delay(500);
-  
-  // Send HELLO to notify Bridge of boot/reboot
+#endif
+
+  // Role: NVS override, else the board decides (see nowde_config.h)
+  boardId = uiDetectBoard();
+  storedRole = loadRoleFromEEPROM();
+  uint8_t resolved = storedRole;
+  if (storedRole == NOWDE_ROLE_AUTO) {
+    resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
+             : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
+             : NOWDE_ROLE_LEGACY;
+  }
+  nodeRole = resolved;  // applyRole() runs after ESP-NOW is up
+  DEBUG_SERIAL.printf("[INIT] Board id %u, role stored %u -> %s\r\n", boardId, storedRole,
+                      resolved == NOWDE_ROLE_MASTER ? "MASTER" : resolved == NOWDE_ROLE_SLAVE ? "SLAVE" : "LEGACY");
+
+  // Send HELLO to notify the host of boot/reboot
   sendHello();
 
   meshClock.setDebugLog(0);  // LOG_ALL / LOG_SYNC / LOG_BCAST / LOG_RX / 0
@@ -232,7 +262,8 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  DEBUG_SERIAL.println("[INIT] WiFi STA mode configured");
+  esp_wifi_set_channel(NOWDE_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d\r\n", NOWDE_WIFI_CHANNEL);
 
   if (esp_now_init() != ESP_OK) {
     DEBUG_SERIAL.println("[ERROR] ESP-NOW init failed!");
@@ -253,12 +284,15 @@ void setup() {
     savedLayer = DEFAULT_RECEIVER_LAYER;
   }
   
-  receiverModeEnabled = true;
   strncpy(subscribedLayer, savedLayer.c_str(), MAX_LAYER_LENGTH);
   subscribedLayer[MAX_LAYER_LENGTH - 1] = '\0';
-  DEBUG_SERIAL.println("[INIT] Auto-starting receiver mode");
+  applyRole(nodeRole);   // receiver always on; master = sender from boot
+  DEBUG_SERIAL.println("[INIT] Receiver mode on");
   DEBUG_SERIAL.print("  Subscribed Layer: ");
   DEBUG_SERIAL.println(subscribedLayer);
+  if (senderModeEnabled) {
+    DEBUG_SERIAL.println("[INIT] Sender mode on (master role)");
+  }
   DEBUG_SERIAL.println();
   
   // Create MIDI task on Core 0 with high priority (configMAX_PRIORITIES - 1)

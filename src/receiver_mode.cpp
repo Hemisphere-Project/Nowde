@@ -60,7 +60,7 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
 
   const MediaSyncPacket* syncPacket = reinterpret_cast<const MediaSyncPacket*>(data);
 
-  if (strncmp(syncPacket->layer, subscribedLayer, MAX_LAYER_LENGTH) != 0) {
+  if (!layerMatches(subscribedLayer, syncPacket->layer)) {
     return;
   }
 
@@ -110,10 +110,14 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   // Handle state transitions
   if (stateChangedToPlaying) {
     DEBUG_SERIAL.println("[MEDIA SYNC] Media started playing");
+    // v2: full-frame so a host can seek before the first quarter-frame cycle, then Start
+    midiSendFullFrame(compensatedPositionMs);
+    midiSendStart();
   } else if (stateChangedToStopped) {
     // Just stopped: send CC#100 = 0 to signal stop (only place where CC#100=0 is sent)
     DEBUG_SERIAL.println("[MEDIA SYNC] Media stopped - sending CC#100=0");
     midiSendCC100(0);
+    midiSendStop();
     mediaSyncState.lastSentIndex = 0;
     mediaSyncState.lastCC100SendTime = now;
   }
