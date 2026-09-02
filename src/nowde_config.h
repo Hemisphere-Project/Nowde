@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "2.0"
+#define NOWDE_VERSION "2.1"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -69,6 +69,13 @@
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
+
+// ============= HOST MIDI IN (v2.1, master) =============
+#define HOST_MIDI_SYNC_INTERVAL_MS 100      // MediaSync cadence while the host clock runs
+#define HOST_MIDI_IDLE_INTERVAL_MS 1000     // ... while stopped
+#define HOST_MIDI_MTC_TIMEOUT_MS 250        // no quarter-frame for this long = MTC stopped
+#define HOST_MIDI_SYSEX_PRIORITY_MS 2000    // SysEx MEDIA_SYNC seen within this window wins
+#define MTC_QF_LAG_FRAMES 2                 // an 8-piece QF sequence spans two frames
 
 // ============= HOST LINK =============
 // A host is considered linked while it has sent us anything within this window

@@ -3,6 +3,7 @@
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "sysex.h"
+#include "host_clock.h"
 
 namespace {
 constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
@@ -115,6 +116,20 @@ void midiProcess() {
     }
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
     uint8_t cin = packet.header & 0x0F;
+
+    // v2.1 — plain MIDI from the host (a master's DAW / QLab / keyboard)
+    if (cin == 0x2 && packet.byte1 == 0xF1) {                 // MTC quarter-frame
+      hostClockOnQuarterFrame(packet.byte2);
+      continue;
+    }
+    if (cin == 0xB) {                                          // control change
+      hostClockOnControlChange(packet.byte1 & 0x0F, packet.byte2, packet.byte3);
+      continue;
+    }
+    if ((cin == 0xF || cin == 0x5) && packet.byte1 >= 0xF8) { // single-byte real-time
+      hostClockOnRealtime(packet.byte1);
+      continue;
+    }
 
     if (cin >= 0x4 && cin <= 0x7) {
       int dataBytes = 0;

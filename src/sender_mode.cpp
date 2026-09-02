@@ -239,3 +239,31 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
 
   (void)changed;
 }
+
+int sendMediaSyncToReceivers(const MediaSyncPacket& packet) {
+  int sentCount = 0;
+  for (int i = 0; i < MAX_RECEIVERS; i++) {
+    // Only send to CONNECTED receivers on matching layer
+    // Disconnected receivers (not sending info) are skipped to prevent blocking
+    if (receiverTable[i].active && receiverTable[i].connected &&
+        layerMatches(receiverTable[i].layer, packet.layer)) {
+      if (!rfSimulationEnabled) {
+        esp_now_send(receiverTable[i].mac, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+      } else {
+        // RF simulation - add random delay
+        for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
+          if (!delayedPackets[j].active) {
+            unsigned long delayMs = random(0, rfSimMaxDelayMs + 1);
+            delayedPackets[j].sendTime = millis() + delayMs;
+            delayedPackets[j].packet = packet;
+            memcpy(delayedPackets[j].receiverMac, receiverTable[i].mac, 6);
+            delayedPackets[j].active = true;
+            break;
+          }
+        }
+      }
+      sentCount++;
+    }
+  }
+  return sentCount;
+}

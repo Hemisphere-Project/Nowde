@@ -84,7 +84,10 @@ bool hostLinked() {
 
 bool layerMatches(const char* subscribed, const char* packetLayer) {
   if (strncmp(subscribed, NOWDE_LAYER_WILDCARD, MAX_LAYER_LENGTH) == 0) {
-    return true;
+    return true;   // this slave follows any layer
+  }
+  if (strncmp(packetLayer, NOWDE_LAYER_WILDCARD, MAX_LAYER_LENGTH) == 0) {
+    return true;   // v2.1: a master on "*" (MIDI-in path) addresses every slave
   }
   return strncmp(subscribed, packetLayer, MAX_LAYER_LENGTH) == 0;
 }

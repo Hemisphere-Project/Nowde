@@ -125,6 +125,27 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling.
 - *(v2)* Relayed **Note / CC / Program Change** from the master host, on their
   original channel, emitted at their scheduled mesh time.
 
+## v2.1 · Generic MIDI in (master, branch `v2.1-midi-in`)
+
+A master node also accepts **plain MIDI** from its host, so a DAW, QLab, Millumin without
+the Bridge, or a keyboard can drive the mesh without speaking `0x7D` SysEx:
+
+| Host sends | Node does |
+|------------|-----------|
+| MTC quarter-frames (`F1 0n`…`F1 7n`) | position = decoded timecode + 2 frames (the 8-piece sequence spans two frames), running = true; 24 / 25 / 29.97 / 30 fps from the rate bits |
+| MTC full-frame `F0 7F 7F 01 01 hh mm ss ff F7` | position jump |
+| `CC#100 = N` (any channel) | media index N; `0` = stop |
+| Start `FA` | position 0, running |
+| Continue `FB` / Stop `FC` | running / stopped |
+| no quarter-frame for 250 ms | stopped (the host paused its MTC) |
+
+The node emits the usual `MediaSyncPacket` stream from that (100 ms running, 1 s idle,
+immediately on any change) on **its own layer** (`SET_LOCAL_LAYER`; the AtomS3 default `*`
+addresses every slave — a packet tagged `*` matches any subscription). **SysEx keeps
+priority**: for 2 s after any `MEDIA_SYNC` frame, MIDI in is ignored, so a MillluBridge /
+HPlayer2 host is never disturbed by stray MIDI. Other CCs, notes and program changes are
+not relayed yet (`MIDI_EVENT 0x04` stays reserved).
+
 ## Firmware tasks
 
 | Task | Core | Priority | Period | Job |

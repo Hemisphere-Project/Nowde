@@ -13,6 +13,7 @@
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+#include "host_clock.h"
 
 // OTA state tracking (otaInProgress lives in nowde_state, the UI reads it)
 static size_t otaTotalSize = 0;
@@ -88,6 +89,12 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
     return;  // Not a valid SysEx message
   }
   
+  // Universal real-time MTC full-frame: F0 7F 7F 01 01 hh mm ss ff F7 (v2.1 host MIDI in)
+  if (length == 10 && data[1] == 0x7F && data[2] == 0x7F && data[3] == 0x01 && data[4] == 0x01) {
+    hostClockOnFullFrame(data[5], data[6], data[7], data[8]);
+    return;
+  }
+
   // Silently ignore SysEx messages not for us (e.g., Universal SysEx 0x7E, system messages)
   if (length < 3 || data[1] != SYSEX_MANUFACTURER_ID) {
     return;
@@ -336,33 +343,8 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.state = state;
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
 
-        int sentCount = 0;
-        for (int i = 0; i < MAX_RECEIVERS; i++) {
-          // Only send to CONNECTED receivers on matching layer
-          // Disconnected receivers (not sending info) are skipped to prevent blocking
-          if (receiverTable[i].active && receiverTable[i].connected &&
-              layerMatches(receiverTable[i].layer, targetLayer)) {
-            
-            if (!rfSimulationEnabled) {
-              // Normal send - no delay
-              esp_now_send(receiverTable[i].mac, reinterpret_cast<uint8_t*>(&syncPacket), sizeof(syncPacket));
-            } else {
-              // RF simulation - add random delay
-              // Find free slot in delayed packets queue
-              for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
-                if (!delayedPackets[j].active) {
-                  unsigned long delayMs = random(0, rfSimMaxDelayMs + 1);
-                  delayedPackets[j].sendTime = millis() + delayMs;
-                  delayedPackets[j].packet = syncPacket;
-                  memcpy(delayedPackets[j].receiverMac, receiverTable[i].mac, 6);
-                  delayedPackets[j].active = true;
-                  break;
-                }
-              }
-            }
-            sentCount++;
-          }
-        }
+        hostClockNoteSysExSync();   // SysEx keeps priority over MIDI-in (v2.1)
+        sendMediaSyncToReceivers(syncPacket);
 
         // ESP-NOW TX logging disabled for media sync to reduce clutter
         // Sync packets sent every ~100ms but not logged

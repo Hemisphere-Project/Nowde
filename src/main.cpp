@@ -38,6 +38,7 @@
 #include "storage.h"
 #include "sysex.h"
 #include "ui.h"
+#include "host_clock.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -205,6 +206,7 @@ void espnowTask(void* parameter) {
     }
 
     meshClock.loop();
+    hostClockTick();   // v2.1: MIDI-in master path
     uiTick();
     vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
   }
