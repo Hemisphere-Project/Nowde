@@ -68,9 +68,9 @@ class Node:
                     print(f"\n  <- {name} {info}")
             elif len(msg.data) == 8 and tuple(msg.data[0:4]) == (127, 127, 1, 1):
                 h, m, s, f = msg.data[4] & 0x1F, msg.data[5], msg.data[6], msg.data[7]
-                print(f"  <- MTC full-frame {h:02d}:{m:02d}:{s:02d}:{f:02d}")
+                print(f"\n  <- MTC full-frame {h:02d}:{m:02d}:{s:02d}:{f:02d}")
             else:
-                print(f"  <- sysex {' '.join('%02X' % b for b in msg.data)}")
+                print(f"\n  <- sysex {' '.join('%02X' % b for b in msg.data)}")
         elif msg.type == 'quarter_frame':
             self.qf[msg.frame_type] = msg.frame_value
             if msg.frame_type == 7:

@@ -83,16 +83,16 @@ AtomS3 on a second Pi (or on the first Pi, Lite on another).
 
 ## 6 · Fault and range matrix (30 min, note the numbers)
 
-| Test | Expect | Measured |
+| Test | Expect | Measured 2026-09-04 |
 |------|--------|----------|
-| cold start, 2 nodes → SYNCED | < 10 s | |
-| slave lock from clip start (Drifter in dead zone) | < 15 s | |
-| residual drift after lock (drifter log) | < 40 ms p95 | |
-| master unplug → slaves stop | 10 s | |
-| master back → slaves playing | < 5 s | |
-| distance AtomS3 ↔ Lite, line of sight, still SYNCED | ≥ 30 m | |
-| same, through the player enclosure + a wall | ≥ 10 m | |
-| Pi hotspot on next to the nodes (channel 1) | still SYNCED | |
+| cold start, 2 nodes → SYNCED | < 10 s | ~1 s (slave registers the beacon within the master's first second) |
+| slave lock from clip start (Drifter in dead zone) | < 15 s | ~8 s (player-000, jumpFix 200) |
+| residual drift after lock (drifter log) | < 40 ms p95 | inside the ±25 ms dead zone (no servo lines) between locks; +1..2 ms mesh compensation |
+| master unplug → slaves stop | 10 s | 10 s (`LINK LOST`, CC#100=0 + Stop) |
+| master back → slaves playing | < 5 s | next stream: immediate; master Pi power cut: 18 s after HPlayer2 is back |
+| distance AtomS3 ↔ Lite, line of sight, still SYNCED | ≥ 30 m | *(to walk, Thomas)* |
+| same, through the player enclosure + a wall | ≥ 10 m | *(to walk)* |
+| Pi hotspot on next to the nodes (channel 1) | still SYNCED | *(not tried)* |
 
 ## 7 · Freeze (06/09)
 
@@ -168,6 +168,11 @@ commits; HPlayer2 `master`.
   would restart at each loop. Fixed in HPlayer2 (`STOP_DEBOUNCE` 0.5 s on the master leg).
   Also seen once: the Pi's login path wedged (ssh auth ok, no session; journal frozen) while
   HPlayer2 kept streaming — no persistent journal, cause unknown after the power cycle.
+- **Multi-file master ✅**: a second clip copied on player-000 → the playlist restarts (boot
+  content, loop 2), and at each clip boundary the slaves get `CC#100 = 2` / `= 1` with no stop in
+  between (debounce) and a full-frame for the position jump (`Position jump -120074 ms ->
+  full-frame`, `F0 7F 7F 01 01 60 00 00 00 F7` on the host). Note: `nowde-cli watch` printed that
+  full-frame on the MTC counter line, easy to miss in a grep — fixed.
 - Bench tooling: `nowde-cli play -t SEC` (no signals: `timeout` + `uv` deliver SIGINT twice),
   `--no-stop` for the link-lost test; a CDC capture helper that reboots the node through the
   1200-bps touch and grabs the port before the banner (DTR must be up, or nothing is logged).

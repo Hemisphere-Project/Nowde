@@ -76,6 +76,15 @@ Only the index travels: which file a slave plays for index 7 is that slave's own
 media folder. Keep the same index on every player for the same cue, and the same
 duration if the content loops seamlessly on the master.
 
+A stop is relayed only after it lasted 0.5 s (`STOP_DEBOUNCE`): mpv reports its loop
+point and every playlist step as a ~100 ms stopped/playing flicker, which would restart
+every slave at each wrap. Paused reads as index 0 (stop) on the slaves.
+
+Biennale content convention (`profiles/biennale.py`): the master loops its default set
+(`[^1-9_]*.*`, everything but the `1_`…`9_` one-shots) at boot, at schedule-open and when
+the node's role lands, so loop content is named with a zero-padded prefix — `01_…`, `02_…`
+— which carries index 1, 2 to the slaves; slaves carry the same names.
+
 **Node log.** With the `nowde-nodelog` setting on (http2 panel), the interface asks a v2
 node for its log (`SET_LOG`) and prints every `LOG` frame as `node| …` in its own log —
 the ESP-NOW side of a problem lands in the player's journal. Off by default: no extra
