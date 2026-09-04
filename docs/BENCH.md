@@ -158,6 +158,16 @@ commits; HPlayer2 `master`.
   Found on the way: a HELLO before app-run was dropped (role fell back to "assuming v1 node";
   fixed in HPlayer2), a slave that boots before its master played its own content (fixed: the
   node sends `CC#100=0` on first contact with a stopped master, the profile stops on slave role).
+- **Step 5 (AtomS3 on player-000, Lite on the laptop)**: `HELLO … role=master board=atoms3` →
+  `role: MASTER (HELLO)` (also right after a service restart and after a power-cut boot, HELLO
+  now being parsed before app-run), `MEDIA_SYNC layer=hplayer2 index=1 state=playing`; the Lite
+  reproduces CC#100=1, a full-frame at the Pi's real position, MTC, 10 Hz relay, +1 ms. Power cut
+  on the Pi: the Lite stops 10 s after the last packet, re-arms 18 s later when HPlayer2 is back
+  (CC#100=1, full-frame 00:00:00:00, Start). Found: at every 120 s wrap the master relayed a
+  ~100 ms stopped/playing flicker of mpv's loop point as `CC#100=0` + Stop + Start — every slave
+  would restart at each loop. Fixed in HPlayer2 (`STOP_DEBOUNCE` 0.5 s on the master leg).
+  Also seen once: the Pi's login path wedged (ssh auth ok, no session; journal frozen) while
+  HPlayer2 kept streaming — no persistent journal, cause unknown after the power cycle.
 - Bench tooling: `nowde-cli play -t SEC` (no signals: `timeout` + `uv` deliver SIGINT twice),
   `--no-stop` for the link-lost test; a CDC capture helper that reboots the node through the
   1200-bps touch and grabs the port before the banner (DTR must be up, or nothing is logged).
