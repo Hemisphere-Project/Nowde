@@ -95,6 +95,8 @@ void addBroadcastPeer() {
   } else {
     DEBUG_SERIAL.println("[INIT] Broadcast peer already exists");
   }
+  // ESPNowMeshClock adds the same broadcast peer itself, so tag whichever entry won.
+  nowdeApplyPeerRate(broadcastAddress);
 }
 
 void logDeviceInfo() {
@@ -265,8 +267,18 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+#if NOWDE_WIFI_LR
+  // LR-only PHY. Must be set after the interface is up and before the channel, and every
+  // node on the mesh needs the same build or it simply will not see the others.
+  esp_err_t lrErr = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  if (lrErr != ESP_OK) DEBUG_SERIAL.printf("[LR] set_protocol FAILED: %s\r\n", esp_err_to_name(lrErr));
+#endif
   esp_wifi_set_channel(NOWDE_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d\r\n", NOWDE_WIFI_CHANNEL);
+  DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d%s\r\n", NOWDE_WIFI_CHANNEL,
+                      NOWDE_WIFI_LR ? " [LR]" : "");
+  // Printed on every boot so the policy is checkable on site without reading the binary.
+  DEBUG_SERIAL.printf("[INIT] Link loss: %s\r\n",
+                      NOWDE_STOP_ON_LINK_LOST ? "STOP (CC#100=0 + MIDI Stop)" : "FREEWHEEL");
 
   if (esp_now_init() != ESP_OK) {
     DEBUG_SERIAL.println("[ERROR] ESP-NOW init failed!");

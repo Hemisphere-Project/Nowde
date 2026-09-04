@@ -3,6 +3,7 @@
 #include <esp_now.h>
 #include <cstring>
 
+#include "esp_now_handlers.h"
 #include "midi.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
@@ -110,6 +111,7 @@ void handleSenderBeacon(const esp_now_recv_info_t* info) {
     peerInfo.encrypt = false;
 
     esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    if (addResult == ESP_OK) nowdeApplyPeerRate(info->src_addr);
 
     DEBUG_SERIAL.println("\n[ESP-NOW RX] Sender Beacon");
     DEBUG_SERIAL.print("  From: ");
@@ -214,6 +216,7 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
     peerInfo.encrypt = false;
 
     esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    if (addResult == ESP_OK) nowdeApplyPeerRate(info->src_addr);
 
     DEBUG_SERIAL.println("\n[ESP-NOW RX] Receiver Info");
     DEBUG_SERIAL.print("  From: ");

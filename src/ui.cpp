@@ -112,7 +112,8 @@ void drawStatusPage() {
   } else {
     d.setCursor(4, d.height() - 12);
     d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    d.printf("v%s  ch%d", NOWDE_VERSION, NOWDE_WIFI_CHANNEL);
+    // the LR marker is the one build difference that must be readable at a glance on site
+    d.printf("v%s  ch%d%s", NOWDE_VERSION, NOWDE_WIFI_CHANNEL, NOWDE_WIFI_LR ? " LR" : "");
   }
   d.endWrite();
 }

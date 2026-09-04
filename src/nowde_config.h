@@ -66,10 +66,37 @@
 #ifndef NOWDE_WIFI_CHANNEL
   #define NOWDE_WIFI_CHANNEL 1        // every node must sit on the same channel
 #endif
+// Long-range PHY (ESP-NOW proprietary, 512/256 kbps): roughly +8-10 dB of receiver
+// sensitivity, which is what buys a path through foliage or masonry. The catch is that
+// it is LR-*only* -- a node without this build cannot demodulate LR frames at all, so
+// either the whole mesh carries it or none of it does. A half-flashed fleet does not
+// degrade, it silently loses the nodes you missed (watch the master's `slaves N`).
+// Off by default; env `atoms3-lr` builds it on. See docs/BENCH.md section 6.
+#ifndef NOWDE_WIFI_LR
+  #define NOWDE_WIFI_LR 0
+#endif
+// 250K trades throughput we do not need for the most link budget; 500K is the milder step.
+#ifndef NOWDE_LR_RATE
+  #define NOWDE_LR_RATE WIFI_PHY_RATE_LORA_250K
+#endif
 
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
+
+// What a slave does when the media-sync stream dies (LINK_LOST_TIMEOUT_MS with no packet
+// while playing):
+//   1 = STOP      -- stop the clock, send CC#100=0 + MIDI Stop. The v1.2 / MillluBridge
+//                    behaviour: the host goes visibly idle rather than drifting unattended.
+//   0 = FREEWHEEL -- keep regenerating MTC from the mesh clock and let the stream re-correct
+//                    the position when it returns. A 10 s RF gap costs a few ms of drift
+//                    instead of an audible stop.
+// Freewheel is the right call for a long audio loop in the open (foliage fades come and go);
+// stop is right for a video wall that must not run blind. Env `atoms3` ships FREEWHEEL, the
+// DevKit / v1.2 baseline keeps STOP. Boot log prints which one is live.
+#ifndef NOWDE_STOP_ON_LINK_LOST
+  #define NOWDE_STOP_ON_LINK_LOST 1
+#endif
 
 // ============= HOST LINK =============
 // A host is considered linked while it has sent us anything within this window
@@ -169,7 +196,7 @@ struct MediaSyncState {
   unsigned long localClockStartTime = 0;  // When local clock started running
   unsigned long lastMTCUpdateTime = 0;    // Last MTC send time
   bool linkLost = false;
-  bool stopOnLinkLost = true;  // Configurable: stop or continue on link lost
+  bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;
   unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
 };
