@@ -95,7 +95,9 @@ native little-endian.
 3. If playing and `delta > 0`, `position += delta` (the packet aged in flight).
 4. Store index / position / state, reset the local clock base, clear *link lost*.
 5. Index changed (and ≠ 0) → send `CC#100 = index`. Playing → stopped → send `CC#100 = 0`.
-   While playing, re-send `CC#100 = index` every 1 s.
+   While playing, re-send `CC#100 = index` every 1 s. *(v2)* First packet since boot with
+   index 0 / stopped → `CC#100 = 0` + Stop once, so a host follows the master's state from
+   the first contact (a player that started its own content at boot goes silent).
 
 Between packets the slave advances the position on its own clock and emits MTC
 at 30 fps. No packet for **10 s** while playing → *link lost*: stop the clock and

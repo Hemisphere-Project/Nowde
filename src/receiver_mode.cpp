@@ -87,6 +87,10 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   // Handle state change to stopped
   bool stateChangedToStopped = (mediaSyncState.currentState == 1 && syncPacket->state == 0);
   bool stateChangedToPlaying = (mediaSyncState.currentState == 0 && syncPacket->state == 1);
+  // v2: first packet since boot and the master is stopped -> say so once, so a host that
+  // started its own content at boot follows the master's state from the first contact
+  bool firstContactStopped = (mediaSyncState.lastSentIndex == 255 && syncPacket->state == 0 &&
+                              syncPacket->mediaIndex == 0);
 
   // v2: position jump while playing (loop wrap, seek on the master) -> the host gets a
   // full-frame at once instead of waiting for the next quarter-frame cycle
@@ -130,9 +134,10 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
     // v2: full-frame so a host can seek before the first quarter-frame cycle, then Start
     midiSendFullFrame(compensatedPositionMs);
     midiSendStart();
-  } else if (stateChangedToStopped) {
-    // Just stopped: send CC#100 = 0 to signal stop (only place where CC#100=0 is sent)
-    DEBUG_SERIAL.println("[MEDIA SYNC] Media stopped - sending CC#100=0");
+  } else if (stateChangedToStopped || firstContactStopped) {
+    // Just stopped (or first contact with a stopped master): CC#100 = 0 + Stop
+    DEBUG_SERIAL.println(firstContactStopped ? "[MEDIA SYNC] First contact, master stopped - sending CC#100=0"
+                                             : "[MEDIA SYNC] Media stopped - sending CC#100=0");
     midiSendCC100(0);
     midiSendStop();
     mediaSyncState.lastSentIndex = 0;

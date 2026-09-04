@@ -149,6 +149,15 @@ commits; HPlayer2 `master`.
 - **Link lost ✅** stream without stop frame, master rebooted: 10 s after the last packet the
   Lite logs `LINK LOST`, sends `CC#100 = 0` + Stop; the next stream re-arms it (CC, full-frame,
   Start). Torn mesh-clock reads are now guarded (`meshMillisStable()`): 0 discards since.
+- **Step 4 ✅ (player-000, RastaOS 7.x, kernel 6.18, HPlayer2 biennale@122acef)**: Lite on the Pi,
+  `HELLO … role=slave board=atoms3-lite` → `role: SLAVE (HELLO)`. `play 1` from the laptop: the Pi
+  plays `01_mire.mp4`, the Drifter locks from clip start in ~8 s. With an artificial 20 s loop
+  the wrap is a hard seek: jumpFix 500 (the interface default) overshot by 360 ms, 200 lands in
+  the dead zone (now the profile default). With the loop at the clip's real length (120 s) the
+  wrap goes through mpv's own loop, no seek, re-trimmed within 4 s. Stop → `CC#100=0` → stopped.
+  Found on the way: a HELLO before app-run was dropped (role fell back to "assuming v1 node";
+  fixed in HPlayer2), a slave that boots before its master played its own content (fixed: the
+  node sends `CC#100=0` on first contact with a stopped master, the profile stops on slave role).
 - Bench tooling: `nowde-cli play -t SEC` (no signals: `timeout` + `uv` deliver SIGINT twice),
   `--no-stop` for the link-lost test; a CDC capture helper that reboots the node through the
   1200-bps touch and grabs the port before the banner (DTR must be up, or nothing is logged).
