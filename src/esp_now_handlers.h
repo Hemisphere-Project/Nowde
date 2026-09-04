@@ -27,5 +27,11 @@ inline void nowdeApplyPeerRate(const uint8_t* peer) {
 inline void nowdeApplyPeerRate(const uint8_t*) {}
 #endif
 
+// ESP-NOW delivery tallies, filled by onDataSent(). A rising espnowTxFail is the only
+// warning that a slave is being talked to and not answering.
+extern volatile uint32_t espnowTxOk;
+extern volatile uint32_t espnowTxFail;
+extern volatile uint32_t espnowRelayDropped;
+
 void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status);
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len);

@@ -8,12 +8,41 @@
 #include <esp_system.h>
 #include <Update.h>
 
+#include "esp_now_handlers.h"
 #include "midi.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+
+
+// The media-sync relay used to fire one esp_now_send() per slave back-to-back and throw every
+// return value away. When the driver's TX queue filled mid-burst the surplus sends failed with
+// ESP_ERR_ESPNOW_NO_MEM and vanished -- always the last peers of the fan-out, which is why one
+// slave went permanently silent while the master still listed it as healthy (bench 2026-09-04).
+// Retry just that error (it means "queue full", not "peer gone"), and report anything else.
+volatile uint32_t espnowRelayDropped = 0;
+
+static esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len) {
+  const uint8_t* payload = static_cast<const uint8_t*>(buf);
+  esp_err_t r = esp_now_send(mac, payload, len);
+  for (int tries = 0; r == ESP_ERR_ESPNOW_NO_MEM && tries < 3; tries++) {
+    delay(1);  // let the WiFi task drain a slot; at 10 Hz this costs nothing we can measure
+    r = esp_now_send(mac, payload, len);
+  }
+  if (r != ESP_OK) {
+    espnowRelayDropped++;
+    static unsigned long lastLog = 0;
+    if (millis() - lastLog > 2000) {
+      lastLog = millis();
+      DEBUG_SERIAL.printf("[RELAY] enqueue FAILED for %02X:%02X:%02X:%02X:%02X:%02X : %s (%lu dropped)\r\n",
+                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                          esp_err_to_name(r), (unsigned long)espnowRelayDropped);
+    }
+  }
+  return r;
+}
 
 // OTA state tracking (otaInProgress lives in nowde_state, the UI reads it)
 static size_t otaTotalSize = 0;
@@ -338,6 +367,31 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
 
         int sentCount = 0;
+#if NOWDE_MEDIASYNC_BROADCAST
+        // One frame for the whole fleet instead of one per slave. Receivers already filter on
+        // the layer they carry (receiver_mode.cpp), so nothing changes on their side and a v1.2
+        // receiver reads it too. This deletes the fan-out burst that was dropping the last peer,
+        // and cuts the master's airtime ~N-fold, which is what makes the LR PHY affordable.
+        // The trade: broadcast has no MAC-layer ACK and no retry, so a lost frame is simply
+        // lost -- covered here by the 10 Hz repeat and the slave regenerating MTC from the mesh
+        // clock, i.e. redundancy over time instead of retransmission per packet.
+        if (!rfSimulationEnabled) {
+          if (relaySend(broadcastAddress, &syncPacket, sizeof(syncPacket)) == ESP_OK) {
+            sentCount = 1;
+          }
+        } else {
+          for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
+            if (!delayedPackets[j].active) {
+              delayedPackets[j].sendTime = millis() + random(0, rfSimMaxDelayMs + 1);
+              delayedPackets[j].packet = syncPacket;
+              memcpy(delayedPackets[j].receiverMac, broadcastAddress, 6);
+              delayedPackets[j].active = true;
+              sentCount = 1;
+              break;
+            }
+          }
+        }
+#else
         for (int i = 0; i < MAX_RECEIVERS; i++) {
           // Only send to CONNECTED receivers on matching layer
           // Disconnected receivers (not sending info) are skipped to prevent blocking
@@ -345,8 +399,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
               layerMatches(receiverTable[i].layer, targetLayer)) {
             
             if (!rfSimulationEnabled) {
-              // Normal send - no delay
-              esp_now_send(receiverTable[i].mac, reinterpret_cast<uint8_t*>(&syncPacket), sizeof(syncPacket));
+              // Result checked: see relaySend(). Dropping it here is what hid the dead slave.
+              if (relaySend(receiverTable[i].mac, &syncPacket, sizeof(syncPacket)) != ESP_OK) {
+                sentCount--;  // undo the optimistic count below
+              }
             } else {
               // RF simulation - add random delay
               // Find free slot in delayed packets queue
@@ -364,6 +420,7 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
             sentCount++;
           }
         }
+#endif
 
         // ESP-NOW TX logging disabled for media sync to reduce clutter
         // Sync packets sent every ~100ms but not logged

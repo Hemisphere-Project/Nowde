@@ -79,6 +79,15 @@
 #ifndef NOWDE_LR_RATE
   #define NOWDE_LR_RATE WIFI_PHY_RATE_LORA_250K
 #endif
+// Relay MEDIA_SYNC as ONE broadcast frame instead of one unicast per slave. Receivers already
+// filter on the packet's layer, so this needs no receiver change. Removes the fan-out burst
+// (and the class of bug where one peer silently gets nothing), and cuts master airtime ~N-fold
+// -- the thing that makes LR affordable. Costs the MAC-layer ACK/retry that unicast gives:
+// frame loss is then covered by the 10 Hz repeat, not by the radio. Off by default until the
+// bench says otherwise; env `atoms3-bcast` builds it on.
+#ifndef NOWDE_MEDIASYNC_BROADCAST
+  #define NOWDE_MEDIASYNC_BROADCAST 0
+#endif
 
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)

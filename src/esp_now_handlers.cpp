@@ -8,9 +8,34 @@
 #include "sender_mode.h"
 #include "sysex.h"
 
+// Unicast ESP-NOW frames are ACKed at the MAC layer, so a FAIL here means the peer never
+// answered. This callback used to discard that, and the relay discarded esp_now_send()'s
+// result too -- between them a slave could sit in the master's table looking perfectly
+// healthy (layer, version, seen < 1 s) while receiving nothing at all. Measured on the bench
+// 2026-09-04: the LAST peer of every fan-out burst, silently, for as long as you left it.
+volatile uint32_t espnowTxOk = 0;
+volatile uint32_t espnowTxFail = 0;
+
 void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status) {
-  (void)info;
-  (void)status;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    espnowTxOk++;
+    return;
+  }
+  espnowTxFail++;
+
+  static unsigned long lastLog = 0;
+  if (millis() - lastLog > 2000) {
+    lastLog = millis();
+    if (info != nullptr) {
+      const uint8_t* m = info->des_addr;
+      DEBUG_SERIAL.printf("[ESP-NOW TX] delivery FAILED to %02X:%02X:%02X:%02X:%02X:%02X (%lu ok / %lu fail)\r\n",
+                          m[0], m[1], m[2], m[3], m[4], m[5],
+                          (unsigned long)espnowTxOk, (unsigned long)espnowTxFail);
+    } else {
+      DEBUG_SERIAL.printf("[ESP-NOW TX] delivery FAILED (%lu ok / %lu fail)\r\n",
+                          (unsigned long)espnowTxOk, (unsigned long)espnowTxFail);
+    }
+  }
 }
 
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
