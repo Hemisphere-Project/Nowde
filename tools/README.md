@@ -5,8 +5,8 @@ Python, run with [uv](https://docs.astral.sh/uv/) (dependencies are declared inl
 ```sh
 uv run tools/nowde-cli.py ports          # what is plugged in
 uv run tools/nowde-cli.py hello          # handshake, read version / role / board
-uv run tools/nowde-cli.py watch          # see MTC, CC#100, Start/Stop coming out of a slave
-uv run tools/nowde-cli.py play 3 -d 20   # be the master host: stream index 3, 20 s loop
+uv run tools/nowde-cli.py watch          # see MTC, CC#100, Start/Stop coming out of a slave + the node's own log (v2)
+uv run tools/nowde-cli.py play 3 -d 20 -t 30   # be the master host: stream index 3, 20 s loop, for 30 s (--no-stop: leave without the stop frame)
 uv run tools/nowde-cli.py slaves         # the sender's slave table
 uv run tools/nowde-cli.py ota bin/firmware-atoms3.bin
 uv run tools/nowde-sim.py slave --autoplay   # fake slave node for an HPlayer2 with no hardware

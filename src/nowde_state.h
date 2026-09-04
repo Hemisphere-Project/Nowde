@@ -63,3 +63,7 @@ bool hostLinked();
 bool layerMatches(const char* subscribed, const char* packetLayer);
 // Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node
 void applyRole(uint8_t resolvedRole);
+// meshClock.meshMillis() with a guard against the library's torn 64-bit offset read
+// (another task slewing _offset while we read: the value comes back off by 2^32 us, seen on
+// the bench as "Delta=-4294966 ms"). Two consecutive reads must agree.
+uint32_t meshMillisStable();

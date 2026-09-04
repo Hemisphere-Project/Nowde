@@ -20,7 +20,8 @@
 // for MIDI, UART0 for logs — the MillluBridge baseline).
 #if defined(NOWDE_BOARD_ATOMS3)
   #define NOWDE_BOARD_NAME "atoms3"
-  #define DEBUG_SERIAL USBSerial      // USBCDC instance, see nowde_state.h
+  #include "usb_out.h"
+  #define DEBUG_SERIAL usbLog         // ring buffer -> USBCDC, pumped by the MIDI task (usb_out.h)
   #define NOWDE_HAS_UI 1
 #else
   #define NOWDE_BOARD_NAME "devkit"
@@ -76,7 +77,9 @@
 #define HOST_LINK_TIMEOUT_MS 5000
 
 // ============= MESH CLOCK SYNC =============
+#ifndef TRANSMISSION_DELAY_US          // ESPNowMeshClock defines it too
 #define TRANSMISSION_DELAY_US 1300
+#endif
 
 // ============= SYSEX PROTOCOL =============
 #define SYSEX_START 0xF0
@@ -93,6 +96,7 @@
 #define SYSEX_CMD_OTA_END 0x07
 #define SYSEX_CMD_SET_ROLE 0x08          // v2: F0 7D 08 role F7 (0 slave, 1 master, 7F auto)
 #define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
+#define SYSEX_CMD_SET_LOG 0x0A           // v2: F0 7D 0A on(1) F7 — stream the node log as LOG frames
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10
@@ -104,6 +108,7 @@
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23
 #define SYSEX_CMD_ERROR_REPORT 0x30
+#define SYSEX_CMD_LOG 0x31               // v2: F0 7D 31 text(ascii) F7 — one log line, after SET_LOG 1
 
 // Error codes for ERROR_REPORT
 #define ERROR_CONFIG_INVALID 0x01
@@ -172,3 +177,4 @@ struct MediaSyncState {
 constexpr uint8_t MTC_FRAMERATE = 30;
 constexpr uint32_t LINK_LOST_TIMEOUT_MS = 10000;  // 10 seconds - increased tolerance for temporary sync gaps
 constexpr uint32_t CLOCK_DESYNC_THRESHOLD_MS = 200;
+constexpr uint32_t JUMP_FULLFRAME_THRESHOLD_MS = 1000;  // v2: full-frame when the position jumps this much

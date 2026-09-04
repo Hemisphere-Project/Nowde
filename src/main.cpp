@@ -38,6 +38,7 @@
 #include "storage.h"
 #include "sysex.h"
 #include "ui.h"
+#include "usb_out.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -214,12 +215,14 @@ void setup() {
 #if defined(NOWDE_BOARD_ATOMS3)
   // Single USB-C: descriptors first, then CDC + MIDI as one composite device.
   uiInit();                       // M5Unified: board detection + LCD/LED
+  usbOutInit();                   // queues first: logging/HELLO below only enqueue
   configureUsbDescriptors();
   midiInit();
-  DEBUG_SERIAL.begin();           // USBCDC
+  DEBUG_SERIAL.begin();           // USBCDC behind the log ring (usb_out.h)
   USB.begin();
   delay(1500);                    // let the host enumerate before we log or HELLO
 #else
+  usbOutInit();
   DEBUG_SERIAL.begin(115200);     // UART0
   delay(500);
 #endif

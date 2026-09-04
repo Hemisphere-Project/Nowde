@@ -1,4 +1,5 @@
 #include "sysex.h"
+#include "usb_out.h"
 
 #include <cstring>
 #include <algorithm>
@@ -313,7 +314,7 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
                               (static_cast<uint32_t>(positionBytes[2]) << 8) |
                               static_cast<uint32_t>(positionBytes[3]);
         uint8_t state = data[25];
-        uint32_t meshTimestamp = meshClock.meshMillis();
+        uint32_t meshTimestamp = meshMillisStable();
 
         // Only log media sync on state changes or media index changes
         static uint8_t lastState = 255;
@@ -544,6 +545,16 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_LOG:
+      // v2 — Format: F0 7D 0A [on] F7 ; stream the node log to the host as LOG (0x31) frames
+      if (length >= 5) {
+        usbOutLogEnable(data[3] != 0);
+        DEBUG_SERIAL.printf("[SET_LOG] %s\r\n", data[3] ? "on" : "off");
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
     default:
       DEBUG_SERIAL.printf("[SYSEX] Unknown command: 0x%02X\r\n", command);
       sendErrorReport(ERROR_SYSEX_PARSE_ERROR, &command, 1);
@@ -591,9 +602,10 @@ void sendHello() {
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
   
-  DEBUG_SERIAL.printf("[HELLO] Sending %d bytes\\r\\n", idx);
+  DEBUG_SERIAL.printf("[HELLO] Sending %d bytes\r\n", idx);
   
   // Send via USB MIDI
+  usbOutLock();
   int pos = 0;
   while (pos < idx) {
     midiEventPacket_t packet;
@@ -637,12 +649,14 @@ void sendHello() {
     
     midiWritePacket(packet);
   }
+  usbOutUnlock();
   
   DEBUG_SERIAL.println("[HELLO] Sent to Bridge");
 }
 
 void sendSysExBytes(const uint8_t* message, int len) {
   // Chunk a complete F0..F7 frame into USB-MIDI packets (CIN 4/5/6/7)
+  usbOutLock();
   int pos = 0;
   while (pos < len) {
     midiEventPacket_t packet;
@@ -672,6 +686,7 @@ void sendSysExBytes(const uint8_t* message, int len) {
     }
     midiWritePacket(packet);
   }
+  usbOutUnlock();
 }
 
 void sendConfigState() {

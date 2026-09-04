@@ -115,3 +115,15 @@ void applyRole(uint8_t resolvedRole) {
   }
   receiverModeEnabled = true;
 }
+
+uint32_t meshMillisStable() {
+  uint32_t a = meshClock.meshMillis();
+  for (int i = 0; i < 4; i++) {
+    uint32_t b = meshClock.meshMillis();
+    if (static_cast<int32_t>(b - a) < 100) {   // 32-bit ms wrap-safe; a torn read is off by ~4295 s
+      return b;
+    }
+    a = b;
+  }
+  return a;
+}

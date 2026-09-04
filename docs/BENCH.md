@@ -105,3 +105,54 @@ AtomS3 on a second Pi (or on the first Pi, Lite on another).
 - [ ] Flash 1 × AtomS3 + 5 × Lite with the tagged `firmware-atoms3.bin`; label each with its MAC suffix (LCD info page / `nowde-cli hello`).
 - [ ] Mount inside the player enclosures; USB run strain-relieved (the fragile link, per the radar-box lesson).
 - [ ] 6-node soak ≥ 1 h: AtomS3 LCD `slaves 5`, every Pi locked, no red LED.
+
+## Bench log
+
+### 2026-09-04 — laptop, 1 AtomS3 (D19268) + 1 AtomS3 Lite (99B52C)
+
+Toolchain: PlatformIO 6.1.18 in a Python 3.13 venv (`~/.platformio/penv313`, see README:
+the pioarduino platform refuses the 3.14 the laptop now runs). Nowde `main` + this day's
+commits; HPlayer2 `master`.
+
+- **Step 1 ✅** Stock boards flashed through their ROM port (`303a:1001`, no button). Both
+  enumerate as `303a:8000 Hemisphere Nowde - XXXXXX`, MIDI + CDC. M5Unified tells the models
+  apart: HELLO `role=master board=atoms3` on the AtomS3, `role=slave board=atoms3-lite` on the
+  Lite. Boot log as expected (`Board id 2/3, role stored 127 -> MASTER/SLAVE`). Re-flash through
+  the node's CDC works **only with** `board_upload.use_1200bps_touch` +
+  `wait_for_upload_port` (now in `platformio.ini`): without them esptool's DTR/RTS dance
+  sends the node into ROM mode and loses the port. Recovery from ROM mode: esptool
+  `--before default_reset --after hard_reset` (a bare hard reset does not bring it back).
+- **Step 2 ✅** `slaves` on the AtomS3: `mesh clock SYNCED · 1 slave`, layer `*`, v2.0, seen
+  < 1 s. The Lite registers the master's beacon within 1 s of the master booting.
+- **Step 3 ✅** `play 3 -d 20` from the laptop: the Lite emits `CC#100 = 3`, MTC full-frame,
+  MIDI Start, then MTC at 30 fps (reads 11.63 s at 11.7 s of stream), `CC#100 = 3` every
+  second, relay at exactly 10 Hz, mesh compensation +1..2 ms. Loop wrap at 20 s clean
+  (MTC 00:00:19:29 → 00:00:20:00 → back to 0). Stop frame → `CC#100 = 0` + MIDI Stop. Master
+  rebooted mid-stream and streaming again → the Lite re-arms (CC, full-frame, Start).
+  Firmware change from this: a full-frame is now also sent on position jumps > 1 s.
+- **Observed once**: `PACKET DISCARDED - Clock desync! Delta=-4294966 ms` on the Lite —
+  exactly 2^32 µs: a torn 64-bit read of `_offset` in ESPNowMeshClock (`meshMicros()` is not
+  atomic against `_adjust()` running in another task). One packet dropped, harmless, to fix
+  in the library.
+- **USB link deaths → fixed.** Twice the Lite's CDC log went silent at the first MIDI burst of
+  a stream while MIDI kept working, and its last log lines came out at the *next* session:
+  the prebuilt TinyUSB/DWC2 loses IN transfers when the CDC and the MIDI endpoints are both
+  active. Behind two cascaded hubs the same fault escalated to `disabled by hub (EMI?)` and
+  both boards dropped off the bus (chips alive on ESP-NOW). Fix: one USB writer (the MIDI
+  task, `src/usb_out.*`) and one active IN endpoint — the CDC stays for the 1200-bps flash
+  touch but carries nothing; the node log travels as `LOG` SysEx frames on request
+  (`SET_LOG`, `nowde-cli watch`, HPlayer2 `nowde-nodelog`). A queue that nobody drains for
+  200 ms is dropped (no ghost stream when a host reopens the port; verified: 0 stale packets
+  after 20 s unread). After that: 3/3 streams clean on direct ports, boot log delivered late
+  on the first `watch`, 0 kernel USB errors. **Bench the Atoms on the laptop's own ports or a
+  powered hub**, never on a bus-powered chain.
+- **Link lost ✅** stream without stop frame, master rebooted: 10 s after the last packet the
+  Lite logs `LINK LOST`, sends `CC#100 = 0` + Stop; the next stream re-arms it (CC, full-frame,
+  Start). Torn mesh-clock reads are now guarded (`meshMillisStable()`): 0 discards since.
+- Bench tooling: `nowde-cli play -t SEC` (no signals: `timeout` + `uv` deliver SIGINT twice),
+  `--no-stop` for the link-lost test; a CDC capture helper that reboots the node through the
+  1200-bps touch and grabs the port before the banner (DTR must be up, or nothing is logged).
+- HPlayer2: the loopback tests grabbed the real boards (`^Nowde` matched `Nowde - D19268`
+  first) — they now pin `Nowde - SIM`. `profiles/biennale.py`: a Nowde slave ignores its own
+  schedule/radar; play0 / the master's role hook respect `schedule.isOpen()` (boot at night
+  stays silent).

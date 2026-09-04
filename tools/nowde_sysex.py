@@ -13,12 +13,14 @@ CMD_OTA_DATA = 0x06
 CMD_OTA_END = 0x07
 CMD_SET_ROLE = 0x08
 CMD_SET_LOCAL_LAYER = 0x09
+CMD_SET_LOG = 0x0A
 CMD_MEDIA_SYNC = 0x10
 CMD_CHANGE_RECEIVER_LAYER = 0x11
 CMD_HELLO = 0x20
 CMD_CONFIG_STATE = 0x21
 CMD_RUNNING_STATE = 0x22
 CMD_ERROR_REPORT = 0x30
+CMD_LOG = 0x31
 
 CMD_NAMES = {v: k[4:] for k, v in globals().items() if k.startswith('CMD_')}
 ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 0x7F: 'auto'}
@@ -26,7 +28,8 @@ BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite'}
 ERROR_NAMES = {0x01: 'CONFIG_INVALID', 0x02: 'SYSEX_PARSE_ERROR', 0x03: 'ESPNOW_SEND_FAILED',
                0x04: 'MESH_CLOCK_LOST_SYNC', 0x05: 'RECEIVER_TIMEOUT', 0xFF: 'UNKNOWN'}
 RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT', 7: 'WDT',
-                 8: 'DEEPSLEEP', 9: 'BROWNOUT', 10: 'SDIO', 12: 'USB', 15: 'JTAG'}
+                 8: 'DEEPSLEEP', 9: 'BROWNOUT', 10: 'SDIO', 11: 'USB', 12: 'JTAG',
+                 13: 'EFUSE', 14: 'PWR_GLITCH', 15: 'CPU_LOCKUP'}
 
 
 def encode7(raw):
@@ -91,6 +94,11 @@ def set_local_layer(layer):
     return [MANUFACTURER, CMD_SET_LOCAL_LAYER] + list(str(layer)[:15].encode('ascii', errors='replace'))
 
 
+def set_log(on):
+    """v2: stream the node's own log to the host as LOG frames (bench / journal)."""
+    return [MANUFACTURER, CMD_SET_LOG, 1 if on else 0]
+
+
 def media_sync(layer, index, position_ms, playing):
     index = max(0, min(127, int(index)))
     return ([MANUFACTURER, CMD_MEDIA_SYNC] + layer16(layer) + [index]
@@ -151,6 +159,10 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True):
     return chunks
 
 
+def log_line(text):
+    return [MANUFACTURER, CMD_LOG] + [b & 0x7F for b in str(text)[:100].encode('ascii', errors='replace')]
+
+
 def error_report(code, ctx=()):
     return [MANUFACTURER, CMD_ERROR_REPORT, code & 0x7F, len(ctx)] + [b & 0x7F for b in ctx]
 
@@ -193,6 +205,8 @@ def parse(data):
                 'version': bytes(r[22:30]).decode('ascii', 'ignore').rstrip('\x00'),
                 'last_seen_ms': from_u32be(r[30:34]), 'index': r[35]})
         return name, info
+    if cmd == CMD_LOG:
+        return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}
     if cmd == CMD_ERROR_REPORT and len(d) >= 2:
         return name, {'error': ERROR_NAMES.get(d[0], hex(d[0])), 'ctx': ' '.join('%02X' % b for b in d[2:2 + d[1]])}
     if cmd == CMD_MEDIA_SYNC and len(d) >= 23:

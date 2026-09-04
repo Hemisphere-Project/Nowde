@@ -42,6 +42,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `07` | OTA_END | `F0 7D 07 F7` | Verifies the received size, finalizes, reboots after 2 s. |
 | `08` | SET_ROLE *(v2)* | `F0 7D 08 role(1) F7` | `0` slave, `1` master. Stored in NVS, applied on the spot. |
 | `09` | SET_LOCAL_LAYER *(v2)* | `F0 7D 09 layer(raw ASCII ≤15) F7` | Sets *this* node's subscribed layer (the `0x11` command targets a remote slave). Stored in NVS. |
+| `0A` | SET_LOG *(v2)* | `F0 7D 0A on(1) F7` | `1`: stream the node's own log to the host as `LOG` frames; `0`: stop. Off at boot; the first `1` also delivers the boot log kept since power-up (8 KB). Not stored. Bench / journal aid: `nowde-cli watch` turns it on, HPlayer2 with `nowde-nodelog`. |
 
 ### Host → slaves, relayed by the master (`0x10`–`0x1F`)
 
@@ -59,6 +60,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(36→42)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)`. Only *connected* slaves are listed. |
 | `23` | OTA_ACK | reserved, unused in v1.2 |
 | `30` | ERROR_REPORT | `F0 7D 30 code(1) ctxLen(1) ctx(≤32) F7`. Codes: `01` CONFIG_INVALID, `02` SYSEX_PARSE_ERROR, `03` ESPNOW_SEND_FAILED, `04` MESH_CLOCK_LOST_SYNC, `05` RECEIVER_TIMEOUT, `FF` UNKNOWN. |
+| `31` | LOG *(v2)* | `F0 7D 31 text(ASCII ≤100) F7`. One log line, only after `SET_LOG 1`. Non-ASCII bytes arrive as `?`. |
 
 Unknown commands answer `ERROR_REPORT 02` with the command byte as context.
 Frames whose second byte is not `7D` (universal SysEx, MTC full-frame…) are
@@ -120,10 +122,28 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling.
 - **MTC quarter-frames** (`F1 0n`…`F1 7n`), 30 fps non-drop (rate code 3): all eight
   pieces are sent back to back every 1/30 s, so a host that reassembles on piece 7
   gets a full timecode 30 times a second. Hours wrap at 24.
-- *(v2)* **MTC full-frame** `F0 7F 7F 01 01 hh mm ss ff F7` on start and on jumps.
+- *(v2)* **MTC full-frame** `F0 7F 7F 01 01 hh mm ss ff F7` on start and on position jumps > 1 s (loop wrap, seek).
 - *(v2)* **MIDI Start** (`FA`) on stopped → playing, **Stop** (`FC`) on playing → stopped.
 - *(v2)* Relayed **Note / CC / Program Change** from the master host, on their
   original channel, emitted at their scheduled mesh time.
+
+### USB: one writer, one active IN endpoint *(v2)*
+
+Every packet to the host — MIDI events, SysEx replies, LOG frames — is queued and written by
+the MIDI task alone (`src/usb_out.*`); the ESP-NOW callback and the ESP-NOW task never touch
+TinyUSB, so a slow host can not stall the MTC generator. The composite CDC interface is kept
+for the 1200-bps flash touch but carries no data: on the bench (2026-09-04) the prebuilt
+TinyUSB/DWC2 lost IN transfers whenever the CDC and MIDI endpoints were both active (log
+silent until reboot, or the hub dropping the device). `-DNOWDE_LOG_CDC` puts the log back on
+the CDC for debugging.
+
+While no host reads the MIDI port the TinyUSB FIFO fills and the queue behind it stalls; after
+200 ms of stall the queue is dropped, so a host opening the port later never receives a ghost
+stream of stale MTC / `CC#100` (it gets at most the FIFO's 16 packets, and a fresh `CC#100`
+within a second while playing). A momentary stall (a `RUNNING_STATE` burst) keeps its order.
+
+`meshMillis()` is read through `meshMillisStable()` (two agreeing reads): the library's
+64-bit offset is slewed by another task and a torn read comes back off by 2^32 µs.
 
 ## Firmware tasks
 

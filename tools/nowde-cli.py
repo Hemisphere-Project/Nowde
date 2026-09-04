@@ -8,13 +8,13 @@
   nowde-cli ports                         list MIDI ports (Nowde ones marked)
   nowde-cli hello                         QUERY_CONFIG handshake: HELLO + CONFIG_STATE (turns a legacy node into a sender)
   nowde-cli probe                         QUERY_RUNNING_STATE: HELLO from a v2 node after a silence, silent on a v1.2 receiver
-  nowde-cli watch [-t SEC]                print everything the node sends (SysEx decoded, MTC as timecode, CC)
+  nowde-cli watch [-t SEC] [--no-log]     print everything the node sends (SysEx decoded, MTC as timecode, CC) + its log (v2)
   nowde-cli slaves                        the sender's slave table (RUNNING_STATE)
   nowde-cli set-role master|slave|auto    store the role on the node (v2)
   nowde-cli set-layer NAME                set the node's own layer (v2)
   nowde-cli assign MAC LAYER              re-layer a remote slave through this sender (CHANGE_RECEIVER_LAYER)
-  nowde-cli play INDEX [-l LAYER] [-d SEC] [--from MS] [--rate HZ]
-                                          stream MEDIA_SYNC playing INDEX (loop of SEC seconds) until Ctrl-C
+  nowde-cli play INDEX [-l LAYER] [-d SEC] [-t SEC] [--from MS] [--rate HZ] [--no-stop]
+                                          stream MEDIA_SYNC playing INDEX (loop of SEC seconds) for -t seconds or until Ctrl-C
   nowde-cli stop [-l LAYER]               one MEDIA_SYNC with state=stopped
   nowde-cli rfsim on|off [DELAY_MS]       RF simulation (random send delay) on the sender
   nowde-cli ota FIRMWARE.bin              firmware update over USB-MIDI (the Bridge's OTA flow)
@@ -62,7 +62,10 @@ class Node:
         if msg.type == 'sysex':
             if msg.data and msg.data[0] == nx.MANUFACTURER:
                 name, info = nx.parse(list(msg.data))
-                print(f"  <- {name} {info}")
+                if name == 'LOG':
+                    print(f"\n  node| {info['text']}")
+                else:
+                    print(f"\n  <- {name} {info}")
             elif len(msg.data) == 8 and tuple(msg.data[0:4]) == (127, 127, 1, 1):
                 h, m, s, f = msg.data[4] & 0x1F, msg.data[5], msg.data[6], msg.data[7]
                 print(f"  <- MTC full-frame {h:02d}:{m:02d}:{s:02d}:{f:02d}")
@@ -126,12 +129,17 @@ def cmd_probe(a):
 def cmd_watch(a):
     n = Node(a.port)
     print(f"watching {n.name} for {a.time or 'ever'} s, Ctrl-C to stop")
+    if not a.no_log:
+        n.send(nx.set_log(True))          # v2: the node's log comes along as LOG frames
     try:
         end = time.time() + a.time if a.time else None
         while end is None or time.time() < end:
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
+    if not a.no_log:
+        n.send(nx.set_log(False))
+        time.sleep(0.1)
     n.close()
 
 
@@ -190,14 +198,18 @@ def cmd_play(a):
     start = time.time()
     print(f"streaming MEDIA_SYNC layer={a.layer} index={a.index} loop={a.duration}s at {a.rate} Hz — Ctrl-C to stop")
     try:
-        while True:
+        while not a.time or time.time() - start < a.time:
             pos = int(a.start + ((time.time() - start) * 1000) % (a.duration * 1000))
             n.send(nx.media_sync(a.layer, a.index, pos, True))
             print(f"\r  -> {pos // 60000:02d}:{(pos // 1000) % 60:02d}.{pos % 1000:03d}", end='', flush=True)
             time.sleep(period)
     except KeyboardInterrupt:
-        print()
-    n.send(nx.media_sync(a.layer, 0, 0, False), 'MEDIA_SYNC stop')
+        pass
+    print()
+    if a.no_stop:
+        print("  (no stop frame: the slaves will go LINK LOST after 10 s)")
+    else:
+        n.send(nx.media_sync(a.layer, 0, 0, False), 'MEDIA_SYNC stop')
     time.sleep(0.2)
     n.close()
 
@@ -248,7 +260,8 @@ def main():
     sp.add_parser('ports').set_defaults(f=cmd_ports)
     sp.add_parser('hello').set_defaults(f=cmd_hello)
     sp.add_parser('probe').set_defaults(f=cmd_probe)
-    w = sp.add_parser('watch'); w.add_argument('-t', '--time', type=float, default=0); w.set_defaults(f=cmd_watch)
+    w = sp.add_parser('watch'); w.add_argument('-t', '--time', type=float, default=0)
+    w.add_argument('--no-log', action='store_true', help='do not ask the node for its log (v1.2 nodes)'); w.set_defaults(f=cmd_watch)
     sp.add_parser('slaves').set_defaults(f=cmd_slaves)
     r = sp.add_parser('set-role'); r.add_argument('role', choices=['master', 'slave', 'auto']); r.set_defaults(f=cmd_set_role)
     l = sp.add_parser('set-layer'); l.add_argument('layer'); l.set_defaults(f=cmd_set_layer)
@@ -256,7 +269,10 @@ def main():
     y = sp.add_parser('play'); y.add_argument('index', type=int); y.add_argument('-l', '--layer', default='hplayer2')
     y.add_argument('-d', '--duration', type=float, default=60.0, help='loop length in s')
     y.add_argument('--from', dest='start', type=int, default=0, help='start position ms')
-    y.add_argument('--rate', type=float, default=10.0); y.add_argument('-v', '--verbose', action='store_true'); y.set_defaults(f=cmd_play)
+    y.add_argument('--rate', type=float, default=10.0); y.add_argument('-v', '--verbose', action='store_true')
+    y.add_argument('-t', '--time', type=float, default=0, help='stream for this many s then stop (default: until Ctrl-C)')
+    y.add_argument('--no-stop', action='store_true', help='leave without the stop frame (link-lost test)')
+    y.set_defaults(f=cmd_play)
     s = sp.add_parser('stop'); s.add_argument('-l', '--layer', default='hplayer2'); s.set_defaults(f=cmd_stop)
     f = sp.add_parser('rfsim'); f.add_argument('state', choices=['on', 'off']); f.add_argument('delay', type=int, nargs='?', default=400); f.set_defaults(f=cmd_rfsim)
     o = sp.add_parser('ota'); o.add_argument('firmware'); o.add_argument('--pace', type=float, default=0.004, help='s between chunks'); o.set_defaults(f=cmd_ota)

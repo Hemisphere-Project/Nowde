@@ -64,7 +64,7 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
     return;
   }
 
-  uint32_t currentMeshTime = meshClock.meshMillis();
+  uint32_t currentMeshTime = meshMillisStable();
   int32_t timeDelta = static_cast<int32_t>(currentMeshTime - syncPacket->meshTimestamp);
 
   if (abs(timeDelta) > static_cast<int32_t>(CLOCK_DESYNC_THRESHOLD_MS)) {
@@ -87,6 +87,19 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   // Handle state change to stopped
   bool stateChangedToStopped = (mediaSyncState.currentState == 1 && syncPacket->state == 0);
   bool stateChangedToPlaying = (mediaSyncState.currentState == 0 && syncPacket->state == 1);
+
+  // v2: position jump while playing (loop wrap, seek on the master) -> the host gets a
+  // full-frame at once instead of waiting for the next quarter-frame cycle
+  bool jumped = false;
+  if (mediaSyncState.currentState == 1 && syncPacket->state == 1) {
+    uint32_t expected = mediaSyncState.currentPositionMs + (now - mediaSyncState.localClockStartTime);
+    int32_t diff = static_cast<int32_t>(compensatedPositionMs - expected);
+    jumped = (diff > static_cast<int32_t>(JUMP_FULLFRAME_THRESHOLD_MS) ||
+              diff < -static_cast<int32_t>(JUMP_FULLFRAME_THRESHOLD_MS));
+    if (jumped) {
+      DEBUG_SERIAL.printf("[MEDIA SYNC] Position jump %ld ms -> full-frame\r\n", static_cast<long>(diff));
+    }
+  }
   
   // Update sync state
   mediaSyncState.currentIndex = syncPacket->mediaIndex;
@@ -105,6 +118,10 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
     midiSendCC100(syncPacket->mediaIndex);
     mediaSyncState.lastSentIndex = syncPacket->mediaIndex;
     mediaSyncState.lastCC100SendTime = now;
+  }
+
+  if (jumped) {
+    midiSendFullFrame(compensatedPositionMs);
   }
 
   // Handle state transitions

@@ -76,6 +76,11 @@ Only the index travels: which file a slave plays for index 7 is that slave's own
 media folder. Keep the same index on every player for the same cue, and the same
 duration if the content loops seamlessly on the master.
 
+**Node log.** With the `nowde-nodelog` setting on (http2 panel), the interface asks a v2
+node for its log (`SET_LOG`) and prints every `LOG` frame as `node| …` in its own log —
+the ESP-NOW side of a problem lands in the player's journal. Off by default: no extra
+traffic on the wire.
+
 ## Deployment notes
 
 - The profile decides the behaviour, not the branch: the interface is loaded

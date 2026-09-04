@@ -94,7 +94,7 @@ HPlayer2 in master mode, a script built on `mido`.
 - **ESP32-S3 DevKitC-1** — the original board. Native USB port for MIDI, UART
   port for flashing and logs. Env `esp32-s3-devkitc-1`.
 - **M5Stack AtomS3** (0.85" LCD, button) — master, v2. Env `atoms3`.
-- **M5Stack AtomS3 Lite** (RGB LED, button) — slave, v2. Env `atoms3-lite`.
+- **M5Stack AtomS3 Lite** (RGB LED, button) — slave, v2. Same env `atoms3` (board detected at boot).
 
 The AtomS3 family has a single USB-C on the native USB PHY. v2 builds it as a
 composite **MIDI + CDC** device, so the same cable carries MIDI, the debug log and
@@ -102,7 +102,18 @@ esptool flashing.
 
 ## Build and flash
 
-Requires [PlatformIO](https://platformio.org/) (Python 3.10–3.13).
+Requires [PlatformIO](https://platformio.org/) on **Python 3.10–3.13**: the pioarduino
+platform refuses 3.14. If the system Python moved on (2026-09-04: PlatformIO's own
+`penv` had been rebuilt on 3.14 and every build died with *Python version must be
+between 3.10 and 3.13*), give PlatformIO its own interpreter and keep the shared
+`~/.platformio/packages`:
+
+```sh
+uv venv --python 3.13 ~/.platformio/penv313
+uv pip install --python ~/.platformio/penv313/bin/python platformio pyyaml intelhex pyserial cryptography rich-click
+uv pip install --python ~/.platformio/penv313/bin/python -e ~/.platformio/packages/tool-esptoolpy
+~/.platformio/penv313/bin/pio run -e atoms3
+```
 
 ```sh
 git clone https://github.com/Hemisphere-Project/Nowde.git
@@ -124,9 +135,27 @@ pio device monitor -p /dev/ttyACM0                       # log over the same cab
 ```
 
 Once the v2 firmware runs, the node enumerates as `Nowde - XXXXXX` with a MIDI port
-and a CDC serial port; re-flashing goes through the CDC with esptool's auto-reset.
-If a build crashes before USB comes up, hold the button while plugging in again.
-`atoms3-master` / `atoms3-slave` are the same build with the role forced.
+and a CDC serial port; re-flashing goes through the CDC without touching the button
+(PlatformIO opens it at 1200 bps, the node drops into the ROM bootloader, esptool
+flashes and hard-resets). A stock board flashes the same way through its ROM
+`303a:1001` port. If a build crashes before USB comes up, hold the button while
+plugging in again. `atoms3-master` / `atoms3-slave` are the same build with the role
+forced.
+
+A node left in ROM mode (an interrupted upload: it shows as `Espressif USB JTAG/serial
+debug unit`, no `Nowde` port) comes back with esptool's own reset sequence, not a bare
+hard reset:
+
+```sh
+esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_* --before default_reset --after hard_reset chip_id
+```
+
+The CDC port carries **no data**: the node's log travels over MIDI as `LOG` SysEx frames
+when a host asks for it (`uv run tools/nowde-cli.py watch`, or HPlayer2's `nowde-nodelog`
+setting). The first request also delivers the boot log kept since power-up, so a reboot
+never has to be watched live. Nothing on the player side ever opens the CDC port. (Build
+with `-DNOWDE_LOG_CDC` to put the log back on the CDC; on the bench of 2026-09-04 the
+composite lost transfers whenever both endpoints were active, see `docs/PROTOCOL.md`.)
 
 DevKit notes: flash through the **UART** USB port, plug the **native** USB port
 into the host. If upload fails, hold BOOT while plugging. macOS caches MIDI

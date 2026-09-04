@@ -3,6 +3,7 @@
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "sysex.h"
+#include "usb_out.h"
 
 namespace {
 constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
@@ -31,7 +32,12 @@ void midiInit() {
 }
 
 void midiSendCC100(uint8_t value) {
-  MIDI.controlChange(100, value, 1);
+  midiEventPacket_t p;
+  p.header = 0x0B;          // CIN: control change
+  p.byte1 = 0xB0;           // channel 1
+  p.byte2 = 100;
+  p.byte3 = value & 0x7F;
+  midiWritePacket(p);
   DEBUG_SERIAL.printf("[MIDI TX] CC#100 = %d (channel 1)\r\n", value);
 }
 
@@ -47,6 +53,7 @@ void midiSendTimeCode(uint32_t positionMs) {
     midiWritePacket(packet);
   };
 
+  usbOutLock();   // the 8 pieces stay contiguous in the queue
   sendQuarterFrame(0, t.frames & 0x0F);
   sendQuarterFrame(1, (t.frames >> 4) & 0x01);
   sendQuarterFrame(2, t.seconds & 0x0F);
@@ -57,6 +64,7 @@ void midiSendTimeCode(uint32_t positionMs) {
 
   uint8_t framerateCode = 3;  // 30 fps non-drop
   sendQuarterFrame(7, ((t.hours >> 4) & 0x01) | (framerateCode << 1));
+  usbOutUnlock();
 
   static unsigned long lastMTCLog = 0;
   if (millis() - lastMTCLog > 5000) {
@@ -72,10 +80,12 @@ void midiSendFullFrame(uint32_t positionMs) {
                            static_cast<uint8_t>((3 << 5) | (t.hours & 0x1F)),
                            t.minutes, t.seconds, t.frames, 0xF7};
   midiEventPacket_t p;
+  usbOutLock();
   p.header = 0x04; p.byte1 = msg[0]; p.byte2 = msg[1]; p.byte3 = msg[2]; midiWritePacket(p);
   p.header = 0x04; p.byte1 = msg[3]; p.byte2 = msg[4]; p.byte3 = msg[5]; midiWritePacket(p);
   p.header = 0x04; p.byte1 = msg[6]; p.byte2 = msg[7]; p.byte3 = msg[8]; midiWritePacket(p);
   p.header = 0x05; p.byte1 = msg[9]; p.byte2 = 0;      p.byte3 = 0;      midiWritePacket(p);
+  usbOutUnlock();
   DEBUG_SERIAL.printf("[MIDI TX] MTC full-frame %02d:%02d:%02d:%02d\r\n", t.hours, t.minutes, t.seconds, t.frames);
 }
 
@@ -99,7 +109,8 @@ void midiSendStop() {
 }
 
 void midiWritePacket(midiEventPacket_t& packet) {
-  MIDI.writePacket(&packet);
+  // Queued: only the MIDI task touches TinyUSB (usb_out.h)
+  usbOutMidi(packet);
 }
 
 bool midiReadPacket(midiEventPacket_t* packet) {
@@ -108,6 +119,8 @@ bool midiReadPacket(midiEventPacket_t* packet) {
 
 void midiProcess() {
   midiEventPacket_t packet;
+
+  usbOutPump();   // MIDI task: everything queued for the host goes out here
 
   while (midiReadPacket(&packet)) {
     if (!hostLinked()) {
