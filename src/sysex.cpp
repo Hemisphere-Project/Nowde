@@ -187,19 +187,26 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
-    case SYSEX_CMD_QUERY_RUNNING_STATE:
+    case SYSEX_CMD_QUERY_RUNNING_STATE: {
       // v2: a host that just (re)appeared gets a HELLO first, so it can read our role
       // without QUERY_CONFIG (which would turn a legacy node into a sender).
+      bool sentHello = false;
       if (hostResumed) {
         hostResumed = false;
         sendHello();
+        sentHello = true;
         delay(20);
       }
       if (senderModeEnabled) {
-        // Silently send running state (queried every 1s by Bridge)
+        // Silently send running state (queried every 1s by Bridge) -- carries every slave's lock
         sendRunningState();
+      } else if (!sentHello) {
+        // 2.0.1: a resolved slave answers its host's keepalive with a fresh HELLO, so the host
+        // sees this node's own live syncQuality (a slave never sends RUNNING_STATE).
+        sendHello();
       }
       break;
+    }
 
     case SYSEX_CMD_ENTER_BOOTLOADER:
       // Deprecated - use OTA instead
@@ -655,7 +662,10 @@ void sendHello() {
   // Older parsers (MillluBridge) only check the minimum length and ignore the rest.
   message[msgIdx++] = nodeRole & 0x7F;
   message[msgIdx++] = boardId & 0x7F;
-  
+  // 2.0.1 trailer: this node's own sync quality (NOWDE_SYNC_*), so a slave-connected host reads
+  // real lock from the HELLO it gets on every keepalive (a slave never sends RUNNING_STATE).
+  message[msgIdx++] = nodeSyncQuality() & 0x7F;
+
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
   
@@ -784,7 +794,9 @@ void sendRunningState() {
   
   // Format per chunk: F0 7D 22 [uptimeMs(4,encoded:5)] [meshSynced(1)]
   //   [totalReceivers(1)] [chunkIndex(1)] [chunkCount(1)] [chunkReceivers(1)]
-  //   For each receiver in this chunk: [receiverData(36 bytes, encoded:42)]
+  //   For each receiver in this chunk: [receiverData(37 bytes, encoded:43)]
+  //   receiverData = mac(6) layer(16) version(8) lastSeenMs(4) active(1) mediaIndex(1) syncQuality(1)
+  //   (2.0.1 appended syncQuality; a pre-2.0.1 host reading 42 stops one byte short and ignores it)
   //   F7
   // All multi-byte fields are 7-bit encoded to prevent 0x80-0xFF bytes in data
   
@@ -875,6 +887,7 @@ void sendRunningState() {
 
       rawData[rawIdx++] = 1;  // Active flag
       rawData[rawIdx++] = entry.mediaIndex;
+      rawData[rawIdx++] = entry.syncQuality;   // 2.0.1: per-slave lock (NOWDE_SYNC_*)
 
       int encodedLen = encode7bit(rawData, rawIdx, &message[msgIdx]);
       if (msgIdx + encodedLen >= 512) {

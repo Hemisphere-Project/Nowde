@@ -42,6 +42,8 @@ void sendReceiverInfo() {
   
   // Populate current playing media index (0 = stopped)
   info.mediaIndex = mediaSyncState.currentIndex;
+  // 2.0.1: report our own lock quality so the master counts who is actually delivering.
+  info.syncQuality = nodeSyncQuality();
 
   for (int i = 0; i < MAX_SENDERS; i++) {
     if (senderTable[i].active) {
@@ -67,20 +69,28 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
   uint32_t currentMeshTime = meshMillisStable();
   int32_t timeDelta = static_cast<int32_t>(currentMeshTime - syncPacket->meshTimestamp);
 
-  if (abs(timeDelta) > static_cast<int32_t>(CLOCK_DESYNC_THRESHOLD_MS)) {
-    // Log packet discard with details
-    static unsigned long lastDiscardLog = 0;
-    if (millis() - lastDiscardLog > 1000) {  // Log at most once per second
-      DEBUG_SERIAL.printf("[MEDIA SYNC] PACKET DISCARDED - Clock desync! Delta=%ld ms (threshold=%lu ms)\r\n",
-                         timeDelta, CLOCK_DESYNC_THRESHOLD_MS);
-      lastDiscardLog = millis();
+  // 2.0.1: the mesh-clock delta only bounds the sub-frame position compensation below -- it is
+  // NOT a reason to drop the packet. The master's index/position/state are authoritative no matter
+  // what the clocks say. When they disagree (a stranded/forward-only-latched mesh offset), accept
+  // the packet WITHOUT compensation and mark it coarse, so the slave keeps following the master
+  // instead of freezing on a stale anchor and free-running seconds out of phase (the -69 s bug).
+  // The re-sync self-heal in main.cpp then repairs the mesh clock; full precision returns once the
+  // clocks agree again. Dropping the packet here was the whole failure.
+  bool clockTrustworthy = (abs(timeDelta) <= static_cast<int32_t>(CLOCK_DESYNC_THRESHOLD_MS));
+  mediaSyncState.coarse = !clockTrustworthy;
+  if (!clockTrustworthy) {
+    static unsigned long lastCoarseLog = 0;
+    if (millis() - lastCoarseLog > 1000) {  // at most once per second
+      DEBUG_SERIAL.printf("[MEDIA SYNC] COARSE follow - mesh clock disagrees by %ld ms (threshold=%lu ms); "
+                          "following master position, no compensation\r\n",
+                          static_cast<long>(timeDelta), CLOCK_DESYNC_THRESHOLD_MS);
+      lastCoarseLog = millis();
     }
-    return;
   }
 
   unsigned long now = millis();
   uint32_t compensatedPositionMs = syncPacket->positionMs;
-  if (syncPacket->state == 1 && timeDelta > 0) {
+  if (clockTrustworthy && syncPacket->state == 1 && timeDelta > 0) {
     compensatedPositionMs += timeDelta;
   }
 

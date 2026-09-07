@@ -158,9 +158,13 @@ def cmd_slaves(a):
     if synced is None:
         print("no RUNNING_STATE: the node is not a sender (slave role, or legacy node before `hello`)")
     else:
-        print(f"mesh clock {'SYNCED' if synced else 'not synced'} · {len(rows)} slave(s)")
+        qname = {0: 'NONE', 1: 'coarse', 2: 'LOCKED', 0xFF: '?'}
+        locked = sum(1 for r in rows if r.get('sync_quality') == 2)
+        print(f"mesh clock {'SYNCED' if synced else 'not synced'} · {len(rows)} slave(s) · {locked} LOCKED")
         for r in rows:
-            print(f"  {r['mac']}  layer={r['layer']:<16} v{r['version']:<6} index={r['index']:<3} seen {r['last_seen_ms']} ms ago")
+            q = qname.get(r.get('sync_quality', 0xFF), '?')
+            print(f"  {r['mac']}  lock={q:<6} layer={r['layer']:<16} v{r['version']:<6} "
+                  f"index={r['index']:<3} seen {r['last_seen_ms']} ms ago")
     n.close()
 
 

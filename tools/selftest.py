@@ -38,6 +38,13 @@ _, rs = nx.parse(chunks[0])
 check(rs['synced'] and rs['receivers'][0]['layer'] == 'main' and rs['receivers'][0]['index'] == 9 and rs['receivers'][0]['last_seen_ms'] == 1000, f"RUNNING_STATE parse {rs}")
 check(len(nx.running_state_chunks([], 1, False)) == 1 and nx.parse(nx.running_state_chunks([], 1, False)[0])[1]['total'] == 0, "empty table chunk")
 
+# 2.0.1: sync_quality trailers (HELLO + RUNNING_STATE record)
+hq = nx.hello('2.0.1', 1000, 1, 0, 3, 1)   # slave, board lite, coarse
+check(nx.parse(hq)[1].get('sync_quality') == 1, f"HELLO sync_quality trailer {nx.parse(hq)[1]}")
+rq = nx.running_state_chunks([{'mac': [1, 2, 3, 4, 5, 6], 'layer': 'main', 'version': '2.0.1',
+                               'last_seen_ms': 500, 'index': 2, 'sync_quality': 2}], 1000, True)
+check(nx.parse(rq[0])[1]['receivers'][0]['sync_quality'] == 2, f"RUNNING_STATE sync_quality {nx.parse(rq[0])[1]}")
+
 check(nx.parse(nx.ota_begin(123456))[0] == 'OTA_BEGIN', "OTA_BEGIN")
 check(nx.parse(nx.set_role('auto'))[1] == {'role': 'auto'}, "SET_ROLE")
 print("nowde_sysex selftest OK")

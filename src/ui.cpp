@@ -33,12 +33,18 @@ Rgb statusColor(bool& blink) {
   if (nodeRole == NOWDE_ROLE_MASTER) {
     if (!hostLinked()) return {40, 0, 60};                     // purple: master, no host yet
     if (countConnectedReceivers() == 0) { blink = true; return {60, 60, 0}; }  // yellow blink: no slave
+    // playing but a connected slave is not locked (present != delivering): amber warning
+    if (mediaSyncState.currentState == 1 && countLockedReceivers() < countConnectedReceivers())
+      return {70, 40, 0};
     return mediaSyncState.currentState == 1 ? Rgb{0, 70, 0} : Rgb{0, 40, 60};  // green play / cyan idle
   }
   // slave
   if (mediaSyncState.linkLost) return {80, 0, 0};               // red: lost the master while playing
   if (sync == SyncState::LOST) return {80, 20, 0};              // orange: mesh clock lost
   if (sync == SyncState::ALONE || countActiveSenders() == 0) { blink = true; return {60, 60, 0}; }  // yellow blink: alone
+  // following the master but the mesh clock disagrees (coarse): amber, so a not-precisely-locked
+  // node is visibly distinct from a cleanly locked one even though its audio is still correct.
+  if (mediaSyncState.currentState == 1 && mediaSyncState.coarse) return {70, 40, 0};
   return mediaSyncState.currentState == 1 ? Rgb{0, 70, 0} : Rgb{0, 40, 60};
 }
 
@@ -86,7 +92,8 @@ void drawStatusPage() {
   };
   line("mesh", syncName(meshClock.getSyncState()));
   if (nodeRole == NOWDE_ROLE_MASTER) {
-    line("slaves", String(countConnectedReceivers()));
+    // lock M/N: M slaves actually locked, of N seen. M<N flags "listed but not delivering".
+    line("lock", String(countLockedReceivers()) + "/" + String(countConnectedReceivers()));
   } else {
     line("master", String(countActiveSenders()));
   }

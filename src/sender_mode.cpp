@@ -133,11 +133,15 @@ void handleSenderBeacon(const esp_now_recv_info_t* info) {
 }
 
 void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
-  if (len < static_cast<int>(sizeof(ReceiverInfo))) {
+  // 2.0.1: accept a pre-2.0.1 (shorter) packet too -- syncQuality is an appended trailer.
+  // Require at least through mediaIndex; default syncQuality to UNKNOWN when it is absent.
+  if (len < RECEIVER_INFO_MIN_LEN) {
     return;
   }
 
   const ReceiverInfo* recvInfo = reinterpret_cast<const ReceiverInfo*>(data);
+  const uint8_t rxSyncQuality = (len >= static_cast<int>(sizeof(ReceiverInfo)))
+                                ? recvInfo->syncQuality : NOWDE_SYNC_UNKNOWN;
 
   bool found = false;
   int freeSlot = -1;
@@ -146,9 +150,10 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
   for (int i = 0; i < MAX_RECEIVERS; i++) {
     if (receiverTable[i].active && macEqual(receiverTable[i].mac, info->src_addr)) {
       receiverTable[i].lastSeen = millis();
-      
-      // Update media index silently (no logging)
+
+      // Update media index + reported lock quality silently (no logging)
       receiverTable[i].mediaIndex = recvInfo->mediaIndex;
+      receiverTable[i].syncQuality = rxSyncQuality;
 
       // Only log on RECONNECTION (was disconnected, now connected again)
       if (!receiverTable[i].connected) {
@@ -208,6 +213,7 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
     receiverTable[freeSlot].active = true;
     receiverTable[freeSlot].connected = true;
     receiverTable[freeSlot].mediaIndex = recvInfo->mediaIndex;  // Initialize media index
+    receiverTable[freeSlot].syncQuality = rxSyncQuality;        // 2.0.1: reported lock quality
     changed = true;
 
     esp_now_peer_info_t peerInfo = {};

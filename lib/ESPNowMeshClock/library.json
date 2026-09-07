@@ -1,0 +1,12 @@
+{
+  "name": "ESPNowMeshClock",
+  "version": "1.0.0",
+  "description": "Robust mesh time sync with 64-bit hardware clock as default. For ESP32/ESP-NOW.",
+  "keywords": "esp32, esp-now, clock, sync, mesh, time",
+  "repository": { "type": "git", "url": "https://github.com/Hemisphere-Project/ESPNowMeshClock" },
+  "authors": [{"name": "maigre", "maintainer": true, "url": "https://www.hemisphere-project.com"}],
+  "license": "GPL-3.0",
+  "frameworks": "arduino",
+  "platforms": ["espressif32"],
+  "dependencies": []
+}

@@ -58,7 +58,13 @@ bool macEqual(const uint8_t* mac1, const uint8_t* mac2);
 int countActiveSenders();
 int countActiveReceivers();
 int countConnectedReceivers();
+// Connected receivers this master believes are LOCKED (syncQuality == NOWDE_SYNC_LOCKED),
+// i.e. actually delivering in sync -- not merely alive. Feeds the "lock M/N" LCD line.
+int countLockedReceivers();
 bool hostLinked();
+// This node's own sync quality (NOWDE_SYNC_*): master = LOCKED (it is the reference); a
+// slave = how well it is following the master right now. The honest per-node lock signal.
+uint8_t nodeSyncQuality();
 // A slave subscribed to `subscribed` follows packets tagged `packetLayer`
 bool layerMatches(const char* subscribed, const char* packetLayer);
 // Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node

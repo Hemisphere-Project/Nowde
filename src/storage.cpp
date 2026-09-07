@@ -50,3 +50,18 @@ void clearEEPROM() {
   preferences.end();
   DEBUG_SERIAL.println("[EEPROM] All data cleared");
 }
+
+uint8_t loadResyncRebootCount() {
+  if (!preferences.begin("nowde", true)) {
+    return 0;
+  }
+  uint8_t n = preferences.getUChar("resyncrb", 0);
+  preferences.end();
+  return n;
+}
+
+void saveResyncRebootCount(uint8_t count) {
+  preferences.begin("nowde", false);
+  preferences.putUChar("resyncrb", count);
+  preferences.end();
+}

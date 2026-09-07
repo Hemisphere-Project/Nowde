@@ -1,9 +1,13 @@
 #pragma once
 
 #include <Arduino.h>
+#include <cstddef>   // offsetof
 
 // ============= VERSION & CONSTANTS =============
-#define NOWDE_VERSION "2.0"
+// 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
+// no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
+// signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
+#define NOWDE_VERSION "2.0.1"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -165,12 +169,28 @@ struct SenderBeacon {
   uint8_t type = ESPNOW_MSG_SENDER_BEACON;
 } __attribute__((packed));
 
+// Per-node sync quality (2.0.1). Reported by a slave about itself; also the master's own.
+//   0 = not following (stopped, freewheeling on link loss, or no fresh accepted sync)
+//   1 = following-coarse (following the master's position, but the mesh clock disagrees ->
+//       sub-frame precision is off; audio is still correct)
+//   2 = locked (following AND mesh clock SYNCED AND compensation trustworthy)
+//   0xFF = unknown (a pre-2.0.1 node that does not report it)
+#define NOWDE_SYNC_NONE    0
+#define NOWDE_SYNC_COARSE  1
+#define NOWDE_SYNC_LOCKED  2
+#define NOWDE_SYNC_UNKNOWN 0xFF
+
 struct ReceiverInfo {
   uint8_t type = ESPNOW_MSG_RECEIVER_INFO;
   char layer[MAX_LAYER_LENGTH];
   char version[MAX_VERSION_LENGTH];
-  uint8_t mediaIndex;  // Current playing media index (0 = stopped)
+  uint8_t mediaIndex;   // Current playing media index (0 = stopped)
+  uint8_t syncQuality;  // 2.0.1 trailer: NOWDE_SYNC_* — the slave's own lock, so the master
+                        // can count who is actually delivering, not just who is alive.
 } __attribute__((packed));
+// Wire-compat: the byte is appended. A pre-2.0.1 slave sends the shorter packet; accept it
+// (see handleReceiverInfo) and treat syncQuality as UNKNOWN.
+#define RECEIVER_INFO_MIN_LEN ((int)offsetof(ReceiverInfo, syncQuality))
 
 struct MediaSyncPacket {
   uint8_t type = ESPNOW_MSG_MEDIA_SYNC;
@@ -194,7 +214,8 @@ struct ReceiverEntry {
   unsigned long lastSeen;
   bool active;
   bool connected;
-  uint8_t mediaIndex;  // Current playing media index (0 = stopped)
+  uint8_t mediaIndex;   // Current playing media index (0 = stopped)
+  uint8_t syncQuality = NOWDE_SYNC_UNKNOWN;  // 2.0.1: last reported by the slave (NOWDE_SYNC_*)
 };
 
 struct MediaSyncState {
@@ -208,9 +229,27 @@ struct MediaSyncState {
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;
   unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
+  // 2.0.1: set when the last accepted MEDIA_SYNC was accepted WITHOUT mesh-clock compensation
+  // (|meshNow - meshTimestamp| > CLOCK_DESYNC_THRESHOLD_MS). Position still follows the master;
+  // only sub-frame precision is dropped. Drives the sync-quality signal and the re-sync self-heal.
+  bool coarse = false;
 };
 
 constexpr uint8_t MTC_FRAMERATE = 30;
 constexpr uint32_t LINK_LOST_TIMEOUT_MS = 10000;  // 10 seconds - increased tolerance for temporary sync gaps
-constexpr uint32_t CLOCK_DESYNC_THRESHOLD_MS = 200;
+// Overridable at build time so a bench build (env atoms3-coarsetest, -D...=0) can force every
+// packet into the coarse path to exercise Fix A + the mesh-resync self-heal without real desync.
+#ifndef CLOCK_DESYNC_THRESHOLD_MS_VAL
+#define CLOCK_DESYNC_THRESHOLD_MS_VAL 200
+#endif
+constexpr uint32_t CLOCK_DESYNC_THRESHOLD_MS = CLOCK_DESYNC_THRESHOLD_MS_VAL;
 constexpr uint32_t JUMP_FULLFRAME_THRESHOLD_MS = 1000;  // v2: full-frame when the position jumps this much
+
+// ============= MESH RE-SYNC SELF-HEAL (2.0.1) =============
+// A slave that IS receiving the master (fresh MEDIA_SYNC) but stays coarse / not mesh-locked is
+// stuck on a stranded mesh-clock offset. Escalate: soft meshClock.reset() first, then a reboot.
+// Only fires while packets are arriving — a plain RF outage (no packets) is freewheel, not this.
+constexpr uint32_t MESH_RESYNC_GRACE_MS  = 15000;  // continuous coarse-while-receiving before a soft reset
+constexpr uint8_t  MESH_MAX_SOFT_RESETS  = 2;      // soft meshClock.reset() attempts before escalating
+constexpr uint32_t MESH_REBOOT_GRACE_MS  = 60000;  // continuous stuck (after soft resets) before ESP.restart()
+constexpr uint8_t  MESH_MAX_AUTO_REBOOTS = 2;      // NVS-bounded auto-reboots before giving up (stay coarse+flagged)

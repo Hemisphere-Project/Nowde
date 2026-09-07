@@ -123,12 +123,14 @@ def ota_end():
 
 # ---- node -> host -----------------------------------------------------------------
 
-def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None):
-    """Build a HELLO payload (for simulators)."""
+def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None):
+    """Build a HELLO payload (for simulators). sync_quality is the 2.0.1 trailer byte."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
     if role is not None:
         out += [int(role) & 0x7F, int(board or 0) & 0x7F]
+        if sync_quality is not None:
+            out += [int(sync_quality) & 0x7F]
     return out
 
 
@@ -141,7 +143,8 @@ def config_state(rf_sim=False, delay_ms=400, role=None, board=None, layer=None):
 
 
 def running_state_chunks(receivers, uptime_ms=1000, synced=True):
-    """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index}. One chunk each."""
+    """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index, sync_quality}.
+    One chunk each. sync_quality (2.0.1) defaults to LOCKED (2)."""
     chunks = []
     n = len(receivers)
     count = max(1, n)
@@ -151,7 +154,8 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True):
             r = receivers[ci]
             raw = (list(r['mac']) + layer16(r.get('layer', '-'))
                    + list(str(r.get('version', '2.0')).encode('ascii')[:8].ljust(8, b'\x00'))
-                   + u32be(int(r.get('last_seen_ms', 0))) + [1, int(r.get('index', 0)) & 0x7F])
+                   + u32be(int(r.get('last_seen_ms', 0)))
+                   + [1, int(r.get('index', 0)) & 0x7F, int(r.get('sync_quality', 2)) & 0x7F])
             d += [1] + encode7(raw)
         else:
             d += [0]
@@ -182,6 +186,8 @@ def parse(data):
         if len(d) >= 18:
             info['role'] = ROLE_NAMES.get(d[16], '?')
             info['board'] = BOARD_NAMES.get(d[17], '?')
+        if len(d) >= 19:
+            info['sync_quality'] = d[18]   # 2.0.1: NOWDE_SYNC_* (0 none, 1 coarse, 2 locked)
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}
@@ -195,15 +201,16 @@ def parse(data):
                 'chunk': d[7], 'chunks': d[8], 'receivers': []}
         idx = 10
         for _ in range(d[9]):
-            r = decode7(d[idx:idx + 42])
-            idx += 42
+            r = decode7(d[idx:idx + 43])   # 2.0.1: 37 raw -> 43 encoded (was 36 -> 42)
+            idx += 43
             if len(r) < 36:
                 break
             info['receivers'].append({
                 'mac': ':'.join('%02X' % b for b in r[0:6]), 'mac_bytes': r[0:6],
                 'layer': bytes(r[6:22]).decode('ascii', 'ignore').rstrip('\x00'),
                 'version': bytes(r[22:30]).decode('ascii', 'ignore').rstrip('\x00'),
-                'last_seen_ms': from_u32be(r[30:34]), 'index': r[35]})
+                'last_seen_ms': from_u32be(r[30:34]), 'index': r[35],
+                'sync_quality': r[36] if len(r) >= 37 else 0xFF})   # 2.0.1
         return name, info
     if cmd == CMD_LOG:
         return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}

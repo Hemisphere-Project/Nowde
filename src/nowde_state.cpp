@@ -78,8 +78,41 @@ int countConnectedReceivers() {
   return count;
 }
 
+int countLockedReceivers() {
+  int count = 0;
+  for (int i = 0; i < MAX_RECEIVERS; i++) {
+    if (receiverTable[i].active && receiverTable[i].connected &&
+        receiverTable[i].syncQuality == NOWDE_SYNC_LOCKED) {
+      count++;
+    }
+  }
+  return count;
+}
+
 bool hostLinked() {
   return lastHostRxTime != 0 && (millis() - lastHostRxTime) < HOST_LINK_TIMEOUT_MS;
+}
+
+uint8_t nodeSyncQuality() {
+  // The master is the clock reference -- it does not "follow", so it is trivially locked.
+  if (nodeRole == NOWDE_ROLE_MASTER) {
+    return NOWDE_SYNC_LOCKED;
+  }
+  // Slave / legacy: quality = how well we are following the master right now.
+  if (mediaSyncState.currentState != 1) {
+    return NOWDE_SYNC_NONE;                       // stopped: not following anything
+  }
+  if (mediaSyncState.linkLost) {
+    return NOWDE_SYNC_NONE;                       // freewheeling on link loss, master gone
+  }
+  if ((millis() - mediaSyncState.lastSyncTime) > LINK_LOST_TIMEOUT_MS) {
+    return NOWDE_SYNC_NONE;                       // no fresh accepted sync
+  }
+  // Following the master. Precise only if the mesh clock agrees (compensation was trustworthy).
+  if (mediaSyncState.coarse || meshClock.getSyncState() != SyncState::SYNCED) {
+    return NOWDE_SYNC_COARSE;
+  }
+  return NOWDE_SYNC_LOCKED;
 }
 
 bool layerMatches(const char* subscribed, const char* packetLayer) {

@@ -114,6 +114,65 @@ void logDeviceInfo() {
   DEBUG_SERIAL.println();
 }
 
+// 2.0.1 mesh-resync self-heal. Persisted across reboots, read at boot (setup()).
+uint8_t resyncRebootCount = 0;
+
+// Called each receiver tick. Fires only while the node is COARSE -- following the master (fresh
+// packets, playing) but with a mesh clock that disagrees, i.e. a stranded/forward-only-latched
+// offset. A plain RF outage is NONE (freewheel), never COARSE, so it never triggers this. Audio
+// stays correct throughout via Fix A; this only repairs sub-frame precision. Escalation:
+//   coarse >= MESH_RESYNC_GRACE_MS   -> meshClock.reset() (soft), up to MESH_MAX_SOFT_RESETS
+//   still coarse >= MESH_REBOOT_GRACE_MS after that -> ESP.restart(), bounded by an NVS counter.
+void meshResyncTick() {
+  static unsigned long stuckSince = 0;
+  static unsigned long lastAction = 0;
+  static uint8_t softResets = 0;
+  static bool gaveUpLogged = false;
+
+  uint8_t q = nodeSyncQuality();
+
+  if (q != NOWDE_SYNC_COARSE) {
+    stuckSince = 0;
+    softResets = 0;
+    gaveUpLogged = false;
+    if (q == NOWDE_SYNC_LOCKED && resyncRebootCount != 0) {
+      resyncRebootCount = 0;
+      saveResyncRebootCount(0);          // a real lock re-arms the auto-reboot guard
+      DEBUG_SERIAL.println("[RESYNC] locked again - auto-reboot guard cleared");
+    }
+    return;
+  }
+
+  unsigned long now = millis();
+  if (stuckSince == 0) { stuckSince = now; lastAction = now; softResets = 0; }
+  unsigned long stuckMs = now - stuckSince;
+
+  if (softResets < MESH_MAX_SOFT_RESETS) {
+    if (now - lastAction >= MESH_RESYNC_GRACE_MS) {
+      meshClock.reset();
+      softResets++;
+      lastAction = now;
+      DEBUG_SERIAL.printf("[RESYNC] mesh clock stranded (coarse %lus) - soft reset %u/%u\r\n",
+                          stuckMs / 1000, softResets, MESH_MAX_SOFT_RESETS);
+    }
+    return;
+  }
+
+  // soft resets exhausted -> reboot after the longer grace, bounded so a poisoned mesh can't loop
+  if (stuckMs >= MESH_REBOOT_GRACE_MS) {
+    if (resyncRebootCount < MESH_MAX_AUTO_REBOOTS) {
+      saveResyncRebootCount(resyncRebootCount + 1);
+      DEBUG_SERIAL.printf("[RESYNC] soft resets failed - auto-reboot %u/%u to re-adopt the mesh\r\n",
+                          resyncRebootCount + 1, MESH_MAX_AUTO_REBOOTS);
+      delay(80);                 // best-effort: let a LOG frame drain. Emits NO MIDI Stop -- the
+      ESP.restart();             // Pi rides the ~5-10 s USB gap on its mpv loop + Drifter freewheel.
+    } else if (!gaveUpLogged) {
+      gaveUpLogged = true;
+      DEBUG_SERIAL.println("[RESYNC] auto-reboot cap reached - staying coarse+flagged (audio still follows master)");
+    }
+  }
+}
+
 }  // namespace
 
 // ============= CORE 0 - MIDI/USB TASK (High Priority) =============
@@ -205,6 +264,9 @@ void espnowTask(void* parameter) {
           mediaSyncState.lastMTCUpdateTime = now;
         }
       }
+
+      // 2.0.1: repair a stranded mesh clock (soft reset, then bounded reboot) while COARSE.
+      meshResyncTick();
     }
 
     meshClock.loop();
@@ -255,6 +317,13 @@ void setup() {
   nodeRole = resolved;  // applyRole() runs after ESP-NOW is up
   DEBUG_SERIAL.printf("[INIT] Board id %u, role stored %u -> %s\r\n", boardId, storedRole,
                       resolved == NOWDE_ROLE_MASTER ? "MASTER" : resolved == NOWDE_ROLE_SLAVE ? "SLAVE" : "LEGACY");
+
+  // 2.0.1: carry the mesh-resync auto-reboot count across the reboot so it cannot boot-loop.
+  resyncRebootCount = loadResyncRebootCount();
+  if (resyncRebootCount) {
+    DEBUG_SERIAL.printf("[INIT] mesh-resync auto-reboot count = %u/%u (clears on next real lock)\r\n",
+                        resyncRebootCount, MESH_MAX_AUTO_REBOOTS);
+  }
 
   // Send HELLO to notify the host of boot/reboot
   sendHello();
