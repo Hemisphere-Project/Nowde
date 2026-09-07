@@ -373,6 +373,13 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.state = state;
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
 
+        // 2.0.2: remember what we are relaying so the master's own LCD/LED can show it.
+        // Display only -- deliberately NOT mediaSyncState (see MasterRelayState).
+        masterRelay.index = mediaIndex;
+        masterRelay.positionMs = positionMs;
+        masterRelay.state = state;
+        masterRelay.updatedAt = millis();
+
         int sentCount = 0;
 #if NOWDE_MEDIASYNC_BROADCAST
         // One frame for the whole fleet instead of one per slave. Receivers already filter on

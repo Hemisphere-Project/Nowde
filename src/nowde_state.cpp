@@ -28,6 +28,7 @@ unsigned long lastSenderBeacon = 0;
 unsigned long lastBridgeReport = 0;
 
 MediaSyncState mediaSyncState;
+MasterRelayState masterRelay;
 
 unsigned long lastHostRxTime = 0;
 bool hostResumed = false;
@@ -113,6 +114,13 @@ uint8_t nodeSyncQuality() {
     return NOWDE_SYNC_COARSE;
   }
   return NOWDE_SYNC_LOCKED;
+}
+
+bool masterRelayPlaying() {
+  // The host streams at 10 Hz while playing and 1 Hz while stopped; treat a gap as idle so a
+  // master whose host went away stops claiming to play.
+  return masterRelay.state == 1 && masterRelay.updatedAt != 0 &&
+         (millis() - masterRelay.updatedAt) < 3000;
 }
 
 bool layerMatches(const char* subscribed, const char* packetLayer) {

@@ -4,10 +4,11 @@
 #include <cstddef>   // offsetof
 
 // ============= VERSION & CONSTANTS =============
+// 2.0.2: a relaying master now displays what it relays (its LCD/LED used to read idle).
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.1"
+#define NOWDE_VERSION "2.0.2"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -216,6 +217,18 @@ struct ReceiverEntry {
   bool connected;
   uint8_t mediaIndex;   // Current playing media index (0 = stopped)
   uint8_t syncQuality = NOWDE_SYNC_UNKNOWN;  // 2.0.1: last reported by the slave (NOWDE_SYNC_*)
+};
+
+// 2.0.2: what a MASTER last relayed, for the UI only. The relay path never touches
+// mediaSyncState (that is the RECEIVE state), so without this a master that is actively
+// driving the mesh displays itself as idle -- "# 0 00:00" on a cyan banner. Kept separate on
+// purpose: writing mediaSyncState from the relay would arm the link-loss detector against a
+// lastSyncTime the master never updates, and make the master emit MTC back to its own host.
+struct MasterRelayState {
+  uint8_t index = 0;
+  uint32_t positionMs = 0;
+  uint8_t state = 0;                // 1 = playing
+  unsigned long updatedAt = 0;      // millis() of the last relayed frame (0 = never)
 };
 
 struct MediaSyncState {

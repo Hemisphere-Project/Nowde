@@ -33,10 +33,12 @@ Rgb statusColor(bool& blink) {
   if (nodeRole == NOWDE_ROLE_MASTER) {
     if (!hostLinked()) return {40, 0, 60};                     // purple: master, no host yet
     if (countConnectedReceivers() == 0) { blink = true; return {60, 60, 0}; }  // yellow blink: no slave
-    // playing but a connected slave is not locked (present != delivering): amber warning
-    if (mediaSyncState.currentState == 1 && countLockedReceivers() < countConnectedReceivers())
-      return {70, 40, 0};
-    return mediaSyncState.currentState == 1 ? Rgb{0, 70, 0} : Rgb{0, 40, 60};  // green play / cyan idle
+    // 2.0.2: a master's own play state is what it RELAYS (masterRelay), not mediaSyncState --
+    // the relay path never fills the latter, so this used to sit cyan/idle while driving the mesh.
+    bool playing = masterRelayPlaying();
+    // relaying but a connected slave is not locked (present != delivering): amber warning
+    if (playing && countLockedReceivers() < countConnectedReceivers()) return {70, 40, 0};
+    return playing ? Rgb{0, 70, 0} : Rgb{0, 40, 60};  // green play / cyan idle
   }
   // slave
   if (mediaSyncState.linkLost) return {80, 0, 0};               // red: lost the master while playing
@@ -100,15 +102,22 @@ void drawStatusPage() {
   line("host", hostLinked() ? "LINK" : "---");
   line("layer", String(subscribedLayer));
 
-  // media line: index + position
-  uint32_t pos = mediaSyncState.currentPositionMs;
-  if (mediaSyncState.currentState == 1) {
-    pos += millis() - mediaSyncState.localClockStartTime;
+  // media line: index + position. A master shows what it RELAYS, a slave what it RECEIVES.
+  uint32_t pos;
+  uint8_t idx;
+  bool playing;
+  if (nodeRole == NOWDE_ROLE_MASTER) {
+    playing = masterRelayPlaying();
+    idx = playing ? masterRelay.index : 0;
+    pos = masterRelay.positionMs + (playing ? (millis() - masterRelay.updatedAt) : 0);
+  } else {
+    playing = (mediaSyncState.currentState == 1);
+    idx = mediaSyncState.currentIndex;
+    pos = mediaSyncState.currentPositionMs + (playing ? (millis() - mediaSyncState.localClockStartTime) : 0);
   }
   char media[24];
   snprintf(media, sizeof(media), "%s %u  %02lu:%02lu",
-           mediaSyncState.currentState == 1 ? ">" : "#",
-           mediaSyncState.currentIndex,
+           playing ? ">" : "#", idx,
            (unsigned long)(pos / 60000), (unsigned long)((pos / 1000) % 60));
   line("media", media);
 

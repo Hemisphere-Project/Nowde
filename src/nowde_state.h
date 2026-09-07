@@ -33,6 +33,8 @@ extern unsigned long lastSenderBeacon;
 extern unsigned long lastBridgeReport;
 
 extern MediaSyncState mediaSyncState;
+// 2.0.2: master-side relay state, for the UI only (see MasterRelayState in nowde_config.h)
+extern MasterRelayState masterRelay;
 
 // Host link: last time any USB-MIDI packet came in from the host
 extern unsigned long lastHostRxTime;
@@ -65,6 +67,8 @@ bool hostLinked();
 // This node's own sync quality (NOWDE_SYNC_*): master = LOCKED (it is the reference); a
 // slave = how well it is following the master right now. The honest per-node lock signal.
 uint8_t nodeSyncQuality();
+// A master is "playing" for display purposes while it is still relaying fresh frames.
+bool masterRelayPlaying();
 // A slave subscribed to `subscribed` follows packets tagged `packetLayer`
 bool layerMatches(const char* subscribed, const char* packetLayer);
 // Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node
