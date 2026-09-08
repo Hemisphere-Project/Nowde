@@ -217,7 +217,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 
     case SYSEX_CMD_OTA_BEGIN:
       // Format: F0 7D 05 [size(4 bytes, 7-bit encoded)] F7
-      if (senderModeEnabled && length >= 9) {
+      // Not gated on sender mode: OTA only ever arrives over this node's own USB, and a slave
+      // accepting it beacons nothing. The gate locked every slave out of host-driven reflash
+      // (Biennale 2026 install, 2026-09-08: LR could not roll out without opening the boxes).
+      if (length >= 9) {
         // Decode firmware size (4 bytes raw -> 5 bytes encoded)
         uint8_t sizeBytes[4];
         decode7bit(&data[3], 5, sizeBytes);
