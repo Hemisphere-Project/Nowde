@@ -44,6 +44,24 @@ uint8_t loadRoleFromEEPROM() {
   return role;
 }
 
+// 2.0.3: long-range PHY is a stored switch, not a build. Absent key = the build's default
+// (NOWDE_WIFI_LR), so the `atoms3-lr` env still means "LR unless told otherwise".
+void saveLrToEEPROM(bool on) {
+  preferences.begin("nowde", false);
+  preferences.putUChar("lr", on ? 1 : 0);
+  preferences.end();
+  DEBUG_SERIAL.printf("[EEPROM] LR saved: %u\r\n", on ? 1 : 0);
+}
+
+bool loadLrFromEEPROM() {
+  if (!preferences.begin("nowde", true)) {
+    return NOWDE_WIFI_LR != 0;
+  }
+  uint8_t v = preferences.getUChar("lr", NOWDE_WIFI_LR ? 1 : 0);
+  preferences.end();
+  return v != 0;
+}
+
 void clearEEPROM() {
   preferences.begin("nowde", false);
   preferences.clear();

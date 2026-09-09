@@ -8,11 +8,13 @@
 // LoRa rate config. esp_wifi_set_protocol(LR) alone merely advertises the capability: the
 // frames keep going out at a legacy rate and a non-LR node decodes them perfectly (measured
 // on the bench 2026-09-04, which is how the first LR build was caught doing nothing).
-// Every peer we add therefore has to be tagged. Compiles to nothing on non-LR builds.
+// Every peer we add therefore has to be tagged. 2.0.3: a no-op unless the stored LR switch is
+// on (lrEnabled, nowde_state) — the same binary serves both modes.
 // inline on purpose: main.cpp keeps its file-local helpers in an anonymous namespace, so a
 // definition living there would have internal linkage and never reach sender_mode.cpp.
-#if NOWDE_WIFI_LR
+extern bool lrEnabled;
 inline void nowdeApplyPeerRate(const uint8_t* peer) {
+  if (!lrEnabled) return;
   esp_now_rate_config_t rc = {};
   rc.phymode = WIFI_PHY_MODE_LR;
   rc.rate = NOWDE_LR_RATE;
@@ -23,9 +25,6 @@ inline void nowdeApplyPeerRate(const uint8_t* peer) {
     DEBUG_SERIAL.printf("[LR] peer rate config FAILED: %s\r\n", esp_err_to_name(r));
   }
 }
-#else
-inline void nowdeApplyPeerRate(const uint8_t*) {}
-#endif
 
 // ESP-NOW delivery tallies, filled by onDataSent(). A rising espnowTxFail is the only
 // warning that a slave is being talked to and not answering.

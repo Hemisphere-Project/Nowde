@@ -23,6 +23,9 @@ extern char subscribedLayer[MAX_LAYER_LENGTH];
 extern uint8_t storedRole;
 extern uint8_t nodeRole;
 extern uint8_t boardId;
+// 2.0.3: long-range PHY on/off, loaded from NVS at boot (SET_LR 0x0B stores it and restarts).
+// All-or-nothing across the mesh, exactly like the former build flag.
+extern bool lrEnabled;
 
 extern SenderEntry senderTable[MAX_SENDERS];
 extern ReceiverEntry receiverTable[MAX_RECEIVERS];

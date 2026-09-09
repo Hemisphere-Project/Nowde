@@ -601,6 +601,23 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_LR:
+      // 2.0.3 — Format: F0 7D 0B [on: 0/1] F7 ; long-range PHY switch. Stored in NVS, then the node
+      // restarts to apply it (the protocol is set at init, before the channel). All-or-nothing
+      // across the mesh: a node left on the other setting is invisible, not degraded.
+      if (length >= 5 && (data[3] == 0 || data[3] == 1)) {
+        bool on = data[3] == 1;
+        saveLrToEEPROM(on);
+        lrEnabled = on;
+        DEBUG_SERIAL.printf("[SET_LR] %s -> restarting\r\n", on ? "ON" : "OFF");
+        sendHello();               // the HELLO trailer already carries the new value
+        delay(300);
+        esp_restart();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
     case SYSEX_CMD_SET_LOCAL_LAYER:
       // v2 — Format: F0 7D 09 [layer ascii, 1..15 bytes] F7 ; sets THIS node's subscribed layer
       if (length >= 5) {
@@ -675,6 +692,9 @@ void sendHello() {
   // 2.0.1 trailer: this node's own sync quality (NOWDE_SYNC_*), so a slave-connected host reads
   // real lock from the HELLO it gets on every keepalive (a slave never sends RUNNING_STATE).
   message[msgIdx++] = nodeSyncQuality() & 0x7F;
+  // 2.0.3 trailer: the LR switch as this node runs it, so a fleet check reads the PHY mode of
+  // every node from its host without opening a box (parsers before 2.0.3 ignore the byte).
+  message[msgIdx++] = lrEnabled ? 1 : 0;
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length

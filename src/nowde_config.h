@@ -76,7 +76,9 @@
 // it is LR-*only* -- a node without this build cannot demodulate LR frames at all, so
 // either the whole mesh carries it or none of it does. A half-flashed fleet does not
 // degrade, it silently loses the nodes you missed (watch the master's `slaves N`).
-// Off by default; env `atoms3-lr` builds it on. See docs/BENCH.md section 6.
+// 2.0.3: this is only the DEFAULT for a node whose NVS carries no `lr` key; the live switch is
+// SET_LR (0x0B) over USB, stored in NVS, applied at the restart it triggers. Env `atoms3-lr`
+// still builds it on by default. See docs/BENCH.md section 6.
 #ifndef NOWDE_WIFI_LR
   #define NOWDE_WIFI_LR 0
 #endif
@@ -138,6 +140,7 @@
 #define SYSEX_CMD_SET_ROLE 0x08          // v2: F0 7D 08 role F7 (0 slave, 1 master, 7F auto)
 #define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
 #define SYSEX_CMD_SET_LOG 0x0A           // v2: F0 7D 0A on(1) F7 — stream the node log as LOG frames
+#define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B on(0/1) F7 — store the LR switch in NVS, HELLO, restart
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10

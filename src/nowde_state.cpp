@@ -18,6 +18,7 @@ char subscribedLayer[MAX_LAYER_LENGTH] = "";
 uint8_t storedRole = NOWDE_ROLE_AUTO;
 uint8_t nodeRole = NOWDE_ROLE_LEGACY;
 uint8_t boardId = NOWDE_BOARDID_UNKNOWN;
+bool lrEnabled = NOWDE_WIFI_LR != 0;   // overwritten from NVS in setup()
 
 SenderEntry senderTable[MAX_SENDERS] = {};
 ReceiverEntry receiverTable[MAX_RECEIVERS] = {};
