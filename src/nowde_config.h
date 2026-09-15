@@ -141,6 +141,8 @@
 #define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
 #define SYSEX_CMD_SET_LOG 0x0A           // v2: F0 7D 0A on(1) F7 — stream the node log as LOG frames
 #define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B on(0/1) F7 — store the LR switch in NVS, HELLO, restart
+#define SYSEX_CMD_OTA_DATA_ACKED 0x0C    // 2.0.3: F0 7D 0C seq(7-bit) len(raw bytes) [data 7-bit] F7 — written only if
+                                         // the decoded length matches, answered by OTA_ACK seq status (stop-and-wait)
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10

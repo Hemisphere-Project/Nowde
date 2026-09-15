@@ -290,6 +290,37 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_OTA_DATA_ACKED: {
+      // 2.0.3 — Format: F0 7D 0C [seq 0..127] [len 1..100] [data 7-bit encoded] F7
+      // The blind OTA_DATA stream loses a few frames per megabyte over USB-MIDI (2026-09-15 bench:
+      // 546 bytes short of 1 180 224 at 25 ms pacing, no way to tell until OTA_END). Here every
+      // chunk carries its raw length and a sequence number: a truncated frame decodes short, is
+      // NOT written, and the ACK tells the host to resend it. status: 0 ok, 1 bad length (dropped),
+      // 2 write failed (session aborted), 3 no session.
+      uint8_t seq = length >= 6 ? data[3] : 0;
+      uint8_t st = 3;
+      if (otaInProgress && length >= 6) {
+        uint8_t want = data[4];
+        uint8_t encodedLen = length - 6;  // F0 7D 0C seq len ... F7
+        uint8_t decodedData[256];
+        int decodedLen = decode7bit(&data[5], encodedLen, decodedData);
+        if (decodedLen != want || want == 0) {
+          st = 1;                          // short/garbled frame: drop it, the host resends
+        } else if (Update.write(decodedData, decodedLen) != (size_t)decodedLen) {
+          DEBUG_SERIAL.printf("[OTA DATA] Write failed at %u\r\n", otaReceivedSize);
+          Update.abort();
+          otaInProgress = false;
+          st = 2;
+        } else {
+          otaReceivedSize += decodedLen;
+          st = 0;
+        }
+      }
+      uint8_t ack[6] = {SYSEX_START, SYSEX_MANUFACTURER_ID, SYSEX_CMD_OTA_ACK, seq, st, SYSEX_END};
+      sendSysExBytes(ack, 6);
+      break;
+    }
+
     case SYSEX_CMD_OTA_END:
       // Format: F0 7D 07 F7
       if (otaInProgress) {
