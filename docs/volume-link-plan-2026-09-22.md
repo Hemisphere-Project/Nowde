@@ -1,5 +1,7 @@
 # Master-driven absolute volume over the Nowde mesh — plan (2026-09-22)
 
+Hub task: `nowde#t-041` (firmware) · `hplayer2#t-072` (host side). The 55f742e commit carries a wrong trailer (`t-033`): this is the real reference.
+
 Goal: one slider on the master (W3) sets the software volume of every player in the garden.
 Absolute only (Thomas, 22/09): every packet carries the master's level, so a lost frame costs
 nothing — the next one, 100 ms later, says the same thing. No delta, no per-peer state on the wire.
