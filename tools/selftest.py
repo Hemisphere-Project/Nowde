@@ -1,8 +1,10 @@
-"""Dependency-free checks of nowde_sysex against the byte layouts in docs/PROTOCOL.md."""
+"""Dependency-free checks of nowde_sysex / nowde_mesh against the byte layouts in
+docs/PROTOCOL.md."""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nowde_mesh as nm  # noqa: E402
 import nowde_sysex as nx  # noqa: E402
 
 
@@ -48,3 +50,114 @@ check(nx.parse(rq[0])[1]['receivers'][0]['sync_quality'] == 2, f"RUNNING_STATE s
 check(nx.parse(nx.ota_begin(123456))[0] == 'OTA_BEGIN', "OTA_BEGIN")
 check(nx.parse(nx.set_role('auto'))[1] == {'role': 'auto'}, "SET_ROLE")
 print("nowde_sysex selftest OK")
+
+# ============================================================================================
+# v2.3 — `0x04 MIDI_EVENT`, the frame docs/PROTOCOL.md freezes before any firmware exists.
+# There is nothing to interoperate with yet, so these rows are not a compat check: they are the
+# record of a layout decision, in the one place that fails when somebody edits it by accident.
+# ============================================================================================
+
+ev = [nm.midi_record(0x90, 60, 100, ev_seq=1, offset=0),
+      nm.midi_record(0xB1, 7, 64, ev_seq=2, offset=2),
+      nm.midi_record(0xC2, 5, ev_seq=3, offset=4),          # PC: one data byte, data2 = 0
+      nm.midi_record(0xE3, 0, 64, ev_seq=4, offset=4)]      # pitch bend: the 0xEn upper bound
+# Every multi-byte value here is deliberately byte-ASYMMETRIC — a mask of 0xFFFF or a seq of
+# 0x0101 would round-trip through a big-endian encoder without complaint.
+f = nm.midi_event_frame('hplayer2', ev, fire_at=0xDEADBEEF, seq=0x1234, group_mask=0x8001)
+
+# Field OFFSETS, not just a round trip: the struct is packed and little-endian, and a field
+# that moved would round-trip through this module perfectly while breaking every node.
+check(len(f) == 30 + 4 * 7, f"MIDI_EVENT length {len(f)}")
+check(f[0] == 0x04 and f[1] == 30 and f[2] == 0 and f[3] == 7, "MIDI_EVENT header preamble")
+check(f[4:6] == [0x01, 0x80], f"groupMask at 4, little-endian ({f[4:6]})")
+check(f[6:8] == [0x34, 0x12], f"seq at 6, little-endian ({f[6:8]})")
+check(f[8:12] == [0xEF, 0xBE, 0xAD, 0xDE], f"fireAt at 8, little-endian u32 ({f[8:12]})")
+check(f[12] == 4 and f[13] == 0, "newCount at 12, carryCount at 13")
+check(bytes(f[14:30]) == b'hplayer2' + b'\x00' * 8, "layer[16] at 14, NUL-padded")
+check(f[30:37] == [0x90, 60, 100, 1, 0, 0, 0], "record 0 at hdrLen, evSeq then offset")
+
+p = nm.parse_midi_event(f)
+check(p['layer'] == 'hplayer2' and p['seq'] == 0x1234 and p['fire_at'] == 0xDEADBEEF
+      and p['group_mask'] == 0x8001 and not p['snapshot'], f"MIDI_EVENT header parse {p}")
+check([r['status'] for r in p['new']] == [0x90, 0xB1, 0xC2, 0xE3] and p['carried'] == [],
+      "MIDI_EVENT record parse")
+# Both ends of the channel-voice range, and the data2 = 0 convention for a 0xCn.
+check(p['new'][2]['data2'] == 0 and all(r['voice'] for r in p['new']),
+      f"0x80..0xEF all read as voice {[r['voice'] for r in p['new']]}")
+
+# Carried records are the same events with a NEGATIVE offset, and nothing but the two counts
+# says where they start. Pin the boundary and the sign: i16 two's complement in a packed struct
+# is exactly the sort of field that silently reads as 65 531.
+carry = [nm.midi_record(0x90, 60, 100, ev_seq=1, offset=-5)]
+fc = nm.midi_event_frame('*', [nm.midi_record(0x80, 60, 0, ev_seq=4, offset=0)], carry,
+                         fire_at=1000, seq=2)
+pc = nm.parse_midi_event(fc)
+check(len(pc['new']) == 1 and len(pc['carried']) == 1, "new/carry boundary is the counts")
+check(pc['carried'][0]['offset'] == -5 and pc['carried'][0]['ev_seq'] == 1,
+      f"carried offset is signed {pc['carried'][0]}")
+check(pc['new'][0]['voice'], "0x80 is the bottom of the channel-voice range")
+check(pc['layer'] == '*', "wildcard layer")
+
+# Data bytes are 7-bit on this wire as on every other MIDI one; a caller handing over 0xFF is
+# clamped at the encoder, not passed through to bite a host.
+clamp = nm.parse_midi_event(nm.midi_event_frame('x', [nm.midi_record(0xB0, 0xFF, 0xFF)]))
+check(clamp['new'][0]['data1'] == 0x7F and clamp['new'][0]['data2'] == 0x7F,
+      f"data bytes masked to 7 bits {clamp['new'][0]}")
+
+# The budget, closed both ways. A full frame must survive the `0x05` relay envelope #t-024 has
+# not built yet, so 250 B is not the ceiling — 240 is.
+full = nm.midi_event_frame('sixteen-chars-ok',
+                           [nm.midi_record(0x90, 60, 100, ev_seq=i)
+                            for i in range(nm.MIDI_EVENT_MAX_NEW)],
+                           [nm.midi_record(0x80, 60, 0, ev_seq=i, offset=-5)
+                            for i in range(nm.MIDI_EVENT_MAX_NEW)])
+check(len(full) == nm.MIDI_EVENT_FRAME_MAX == 226, f"full frame is 226 B ({len(full)})")
+check(len(full) + nm.MESH_RELAY_LEN <= nm.ESPNOW_MTU,
+      f"full frame survives the relay envelope ({len(full) + nm.MESH_RELAY_LEN} B)")
+check(nm.parse_midi_event(full + [0] * nm.MESH_RELAY_LEN) is not None
+      and len(nm.parse_midi_event(full)['carried']) == nm.MIDI_EVENT_MAX_NEW,
+      "full frame parses, 14 + 14")
+# The two claims sub-step (1) of #t-036 had to reconcile: the design note's "<= 40 events per
+# frame" predates both the per-event size and the flooding envelope, and does not fit. Asserted
+# as a NON-fit on purpose — the day #t-024 widens the envelope, this is what says so.
+check(30 + 40 * 7 + nm.MESH_RELAY_LEN > nm.ESPNOW_MTU, "the design note's 40 events do not fit")
+check(30 + 2 * 15 * 7 + nm.MESH_RELAY_LEN == nm.ESPNOW_MTU,
+      "15 new would land on the MTU exactly, with no margin — hence 14")
+
+# The one rule that keeps the frame extensible under the charter: a receiver finds record 0 at
+# the frame's own hdrLen and strides by its own recLen. Synthesise the frames a later
+# generation would send — two extra header bytes, one extra record byte — and check this parser
+# still reads what it knows. Without these rows the rule is prose, and prose does not fail.
+grown_hdr = f[:1] + [32] + f[2:30] + [0xAA, 0xBB] + f[30:]
+pg = nm.parse_midi_event(grown_hdr)
+check(pg is not None and [r['ev_seq'] for r in pg['new']] == [1, 2, 3, 4],
+      f"records found at a grown hdrLen {pg}")
+grown_rec = f[:3] + [8] + f[4:30]
+for i in range(4):
+    grown_rec += f[30 + i * 7:37 + i * 7] + [0xCC]
+pr = nm.parse_midi_event(grown_rec)
+check(pr is not None and [r['ev_seq'] for r in pr['new']] == [1, 2, 3, 4],
+      f"records stride by a grown recLen {pr}")
+
+# Reject only too-short, exactly like the SysEx parsers (charter §(b)).
+# f[:10] is the case only the header floor catches — shorter than the count bytes at 12/13, so
+# without that first guard the parser indexes off the end instead of returning None.
+check(nm.parse_midi_event(f[:10]) is None, "frame shorter than the header rejected")
+check(nm.parse_midi_event(f[:29]) is None, "short header rejected")
+check(nm.parse_midi_event(f[:-1]) is None, "truncated record rejected")
+check(nm.parse_midi_event(f + [0x99] * 20) is not None, "trailing bytes accepted and ignored")
+check(nm.parse_midi_event(f[:1] + [29] + f[2:]) is None, "hdrLen below the v2.3 floor rejected")
+check(nm.parse_midi_event(f[:3] + [6] + f[4:]) is None, "recLen below the v2.3 floor rejected")
+
+# SNAPSHOT, and the reserved flag bits an old node must ignore rather than drop on.
+snap = nm.midi_event_frame('main', [nm.midi_record(0xB0, 7, 100, ev_seq=9)], snapshot=True)
+check(nm.parse_midi_event(snap)['snapshot'], "SNAPSHOT flag")
+check(nm.parse_midi_event(snap[:2] + [0x81] + snap[3:])['snapshot'],
+      "reserved flag bits ignored, not fatal")
+# A non-channel-voice status is skipped by the receiver, never fatal to the frame.
+bad = f[:30] + nm.midi_record(0xF8, 0, 0, ev_seq=7) + f[37:]
+pb = nm.parse_midi_event(bad)
+check(pb is not None and [r['voice'] for r in pb['new']] == [False, True, True, True],
+      f"clock byte flagged non-voice, frame still read {pb}")
+
+print("nowde_mesh selftest OK")

@@ -168,7 +168,13 @@
 #define ESPNOW_MSG_SENDER_BEACON 0x01
 #define ESPNOW_MSG_RECEIVER_INFO 0x02
 #define ESPNOW_MSG_MEDIA_SYNC 0x03
-#define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.1: reserved (Note/CC relay scheduled on mesh time)
+#define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.3: byte layout FROZEN in docs/PROTOCOL.md "The v2.3
+                                         // event frame", not yet implemented (#t-037 builds it).
+                                         // 30-byte header + N x 7-byte records, <= 14 new + <= 14
+                                         // carried, <= 226 B so it survives the 0x05 envelope.
+                                         // Locate record 0 at hdrLen and stride by recLen -- never
+                                         // by sizeof: that is what keeps the charter's append-only
+                                         // rule workable on a frame whose tail is an array.
 
 // ============= DATA STRUCTURES =============
 struct SenderBeacon {

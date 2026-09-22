@@ -67,6 +67,19 @@ receivers emit.
   clock and sends `CC#100 = 0` (configurable: freewheel instead).
 - v2 adds **MTC full-frame** SysEx (`F0 7F 7F 01 01 hh mm ss ff F7`) on start and
   jumps, and **MIDI Start / Stop** on state edges.
+- *(v2.3, specified and not yet implemented)* **Relayed channel-voice messages** from the
+  master's host — Note, CC, Program Change, Channel Pressure, Pitch Bend — on their original
+  channel, emitted at the mesh time the master scheduled them for. A host sees ordinary MIDI
+  and has nothing new to implement; the transport is the `0x04` event frame, in
+  [docs/PROTOCOL.md](docs/PROTOCOL.md#the-v23-event-frame-0x04).
+
+**CC#100 and MTC are the integration contract, and v2.3 does not touch them.** The
+numeric-prefix media convention and the CC#100 mapping are what a deployment has to honour —
+they are the whole of how a player is driven, they have been in production on the AnnaTV fleet
+since 2025, and every later release only ever adds a *second* kind of traffic beside them on
+the same port. A player written against the v1.2 contract keeps working unchanged when a v2.3
+master starts relaying MIDI events past it; one that wants those events reads them as MIDI,
+not as a Nowde feature.
 
 The host side of the picture, with the HPlayer2 chase-lock servo that turns MTC
 into playback-speed trims, is in [docs/HPLAYER2.md](docs/HPLAYER2.md).
