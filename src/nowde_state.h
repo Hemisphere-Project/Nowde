@@ -38,6 +38,8 @@ extern unsigned long lastBridgeReport;
 extern MediaSyncState mediaSyncState;
 // 2.0.2: master-side relay state, for the UI only (see MasterRelayState in nowde_config.h)
 extern MasterRelayState masterRelay;
+// v2.2: which master this slave follows (see OriginLock in nowde_config.h)
+extern OriginLock originLock;
 
 // Host link: last time any USB-MIDI packet came in from the host
 extern unsigned long lastHostRxTime;
@@ -74,6 +76,12 @@ uint8_t nodeSyncQuality();
 bool masterRelayPlaying();
 // A slave subscribed to `subscribed` follows packets tagged `packetLayer`
 bool layerMatches(const char* subscribed, const char* packetLayer);
+// v2.2 ORIGIN LOCK. May this node act on a MEDIA_SYNC that originated at `origin`? Adopts an
+// unheld lock, refreshes the held one, and refuses every other master until the held one has
+// been silent for ORIGIN_LOCK_RELEASE_MS (or forever, if a host pinned it with SET_ORIGIN).
+bool originAccepts(const uint8_t* origin);
+// Release the lock and re-anchor the gap counter: the next MEDIA_SYNC heard adopts its origin.
+void originRelease();
 // Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node
 void applyRole(uint8_t resolvedRole);
 // meshClock.meshMillis() with a guard against the library's torn 64-bit offset read

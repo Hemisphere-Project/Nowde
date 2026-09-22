@@ -30,6 +30,7 @@ unsigned long lastBridgeReport = 0;
 
 MediaSyncState mediaSyncState;
 MasterRelayState masterRelay;
+OriginLock originLock;
 
 unsigned long lastHostRxTime = 0;
 bool hostResumed = false;
@@ -129,6 +130,56 @@ bool layerMatches(const char* subscribed, const char* packetLayer) {
     return true;
   }
   return strncmp(subscribed, packetLayer, MAX_LAYER_LENGTH) == 0;
+}
+
+static void logOriginLock(const char* what, const uint8_t* mac) {
+  DEBUG_SERIAL.printf("[ORIGIN] %s %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                      what, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void originRelease() {
+  originLock.valid = false;
+  originLock.pinned = false;
+  memset(originLock.mac, 0, sizeof(originLock.mac));
+  // The next master's seq starts wherever it starts: diffing against the old one's would
+  // charge the difference to the counter as thousands of lost frames.
+  mediaSyncState.haveSeq = false;
+}
+
+bool originAccepts(const uint8_t* origin) {
+  unsigned long now = millis();
+
+  if (!originLock.valid) {
+    memcpy(originLock.mac, origin, 6);
+    originLock.valid = true;
+    originLock.lastHeard = now;
+    mediaSyncState.haveSeq = false;
+    logOriginLock("locked to", origin);
+    return true;
+  }
+
+  if (macEqual(originLock.mac, origin)) {
+    originLock.lastHeard = now;
+    return true;
+  }
+
+  // A different master. Under unicast the receiver table kept installations apart; under
+  // broadcast nothing does, so a `*` slave in earshot of two of them would alternate. Hold
+  // the one we have until it has actually gone quiet -- and forever if a host pinned it.
+  if (!originLock.pinned && (now - originLock.lastHeard) > ORIGIN_LOCK_RELEASE_MS) {
+    logOriginLock("released, switching to", origin);
+    memcpy(originLock.mac, origin, 6);
+    originLock.lastHeard = now;
+    mediaSyncState.haveSeq = false;
+    return true;
+  }
+
+  static unsigned long lastIgnoreLog = 0;
+  if (now - lastIgnoreLog > 5000) {
+    lastIgnoreLog = now;
+    logOriginLock("ignoring foreign master", origin);
+  }
+  return false;
 }
 
 void applyRole(uint8_t resolvedRole) {

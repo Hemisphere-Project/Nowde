@@ -44,6 +44,9 @@ void sendReceiverInfo() {
   info.mediaIndex = mediaSyncState.currentIndex;
   // 2.0.1: report our own lock quality so the master counts who is actually delivering.
   info.syncQuality = nodeSyncQuality();
+  // v2.2: and how many MEDIA_SYNC frames we never got. Under broadcast this is what tells the
+  // master a slave is half-deaf -- it hears this node's beacons either way.
+  info.syncGaps = mediaSyncState.syncGaps;
 
   for (int i = 0; i < MAX_SENDERS; i++) {
     if (senderTable[i].active) {
@@ -55,8 +58,10 @@ void sendReceiverInfo() {
   // Info packets are sent every ~1s but not logged
 }
 
-void processMediaSyncPacket(const uint8_t* data, int len) {
-  if (len < static_cast<int>(sizeof(MediaSyncPacket))) {
+void processMediaSyncPacket(const uint8_t* origin, const uint8_t* data, int len) {
+  // v2.2: the floor is the v1.2 frame, not our own struct — a pre-v2.2 master sends 27 bytes
+  // with no `seq` and must still be followed. Only the trailer read below is length-gated.
+  if (len < MEDIA_SYNC_MIN_LEN) {
     return;
   }
 
@@ -64,6 +69,30 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
 
   if (!layerMatches(subscribedLayer, syncPacket->layer)) {
     return;
+  }
+
+  // v2.2 ORIGIN LOCK. Broadcast delivery no longer asks the master's receiver table who should
+  // hear this, so the filter that kept two installations apart has to live here.
+  if (!originAccepts(origin)) {
+    return;
+  }
+
+  // v2.2 delivery signal: count what we missed, before anything can return early. The master
+  // has no ACK to count under broadcast, so this counter is the only silent-slave detector.
+  if (len >= static_cast<int>(sizeof(MediaSyncPacket))) {
+    uint16_t seq = syncPacket->seq;
+    if (mediaSyncState.haveSeq) {
+      uint16_t gap = static_cast<uint16_t>(seq - mediaSyncState.lastSeq - 1);
+      if (gap > 0 && gap <= MEDIASYNC_MAX_GAP) {
+        uint32_t total = static_cast<uint32_t>(mediaSyncState.syncGaps) + gap;
+        mediaSyncState.syncGaps = (total > 0xFFFF) ? 0xFFFF : static_cast<uint16_t>(total);
+        DEBUG_SERIAL.printf("[MEDIA SYNC] missed %u frame(s) (seq %u -> %u, %u total)\r\n",
+                            gap, mediaSyncState.lastSeq, seq, mediaSyncState.syncGaps);
+      }
+      // gap > MEDIASYNC_MAX_GAP: the master rebooted or we just switched lock. Re-anchor.
+    }
+    mediaSyncState.lastSeq = seq;
+    mediaSyncState.haveSeq = true;
   }
 
   uint32_t currentMeshTime = meshMillisStable();

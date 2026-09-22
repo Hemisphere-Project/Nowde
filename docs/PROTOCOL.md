@@ -43,21 +43,25 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `08` | SET_ROLE *(v2)* | `F0 7D 08 role(1) F7` | `0` slave, `1` master. Stored in NVS, applied on the spot. |
 | `09` | SET_LOCAL_LAYER *(v2)* | `F0 7D 09 layer(raw ASCII ≤15) F7` | Sets *this* node's subscribed layer (the `0x11` command targets a remote slave). Stored in NVS. |
 | `0A` | SET_LOG *(v2)* | `F0 7D 0A on(1) F7` | `1`: stream the node's own log to the host as `LOG` frames; `0`: stop. Off at boot; the first `1` also delivers the boot log kept since power-up (8 KB). Not stored. Bench / journal aid: `nowde-cli watch` turns it on, HPlayer2 with `nowde-nodelog`. |
+| `0B` | SET_LR *(2.0.3)* | `F0 7D 0B on(1) F7` | Long-range PHY switch. Stored in NVS, then the node **restarts** to apply it (the protocol is set before the channel). All-or-nothing across the mesh. Answers `HELLO` before restarting. |
+| `0C` | OTA_DATA_ACKED *(2.0.3)* | `F0 7D 0C seq(1) len(1) data(7-bit) F7` | Stop-and-wait `OTA_DATA`: written only if the decoded length matches `len`, answered by `OTA_ACK seq status`. |
+| `0D` | SET_LOSS_POLICY *(v2.2)* | `F0 7D 0D stop(1) F7` | `1` stop, `0` freewheel, when the `MEDIA_SYNC` stream dies. Stored in NVS and applied **live** — no restart, unlike `SET_LR`. Answers `CONFIG_STATE`. Which one a node wants is a property of where it stands, so it stopped being a build flag. |
+| `0E` | SET_ORIGIN *(v2.2)* | `F0 7D 0E [mac(6→7)] F7` | With a MAC: **pins** the origin lock to that master and holds it through any silence. Without one (`F0 7D 0E F7`, 4 bytes): releases the lock, and the next `MediaSyncPacket` heard adopts its sender. Answers `CONFIG_STATE`. Not stored — a lock is a live fact, not a config. |
 
 ### Host → slaves, relayed by the master (`0x10`–`0x1F`)
 
 | Cmd | Name | Frame | Effect |
 |-----|------|-------|--------|
-| `10` | MEDIA_SYNC | `F0 7D 10 layer(16 raw ASCII, NUL-padded) index(1) position(4→5) state(1) F7` — 27 bytes | Master stamps `meshMillis()` and unicasts a `MediaSyncPacket` to every *connected* slave on `layer`. `position` = milliseconds, big-endian u32 before encoding. `state`: `0` stopped, `1` playing. Send at ~10 Hz while playing; one frame with `state=0` to stop. |
+| `10` | MEDIA_SYNC | `F0 7D 10 layer(16 raw ASCII, NUL-padded) index(1) position(4→5) state(1) F7` — 27 bytes | Master stamps `meshMillis()`, mints a `seq`, and sends **one broadcast** `MediaSyncPacket` *(v2.2 — it was one unicast per connected slave on `layer`)*. `position` = milliseconds, big-endian u32 before encoding. `state`: `0` stopped, `1` playing. Send at ~10 Hz while playing; one frame with `state=0` to stop. |
 | `11` | CHANGE_RECEIVER_LAYER | host form: `F0 7D 11 mac(6→7) layer(16→19) F7` — 29 bytes | Master looks the slave up by MAC and forwards the mesh form (below). `ERROR_REPORT 05` if the MAC is unknown. |
 
 ### Node → host (`0x20`–`0x3F`)
 
 | Cmd | Name | Frame |
 |-----|------|-------|
-| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. *(v2 appends `role(1) board(1)`; parsers must accept longer frames, the MillluBridge one does.)* |
-| `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes. *(v2 appends `role(1) board(1) layerLen(1) layer(ASCII…)`.)* |
-| `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(36→42)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)`. Only *connected* slaves are listed. |
+| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. Trailers are appended in order and each needs the ones before it — *(v2)* `role(1) board(1)`, *(2.0.1)* `syncQuality(1)`, *(2.0.3)* `lr(1)`, *(v2.2)* `syncGaps(2, 14-bit hi/lo)`. Parsers must accept longer frames; the MillluBridge one does. A slave never sends `RUNNING_STATE`, so `syncGaps` here is how its **own** host reads the delivery signal. |
+| `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes. *(v2 appends `role(1) board(1) layerLen(1) layer(ASCII…)`; v2.2 appends `stopOnLinkLost(1) originState(1) originMac(6→7)` after the variable-length layer.)* `originState`: `0` following nobody yet, `1` adopted, `2` pinned by `SET_ORIGIN`. This is the read-back for both runtime switches. |
+| `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(39→45)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)` *(2.0.1 appends `syncQuality(1)`; v2.2 appends `syncGaps(2 BE)`)*. Only *connected* slaves are listed. One record per chunk, so a host that reads the older 36/37-byte record simply stops short of the tail. |
 | `23` | OTA_ACK | reserved, unused in v1.2 |
 | `30` | ERROR_REPORT | `F0 7D 30 code(1) ctxLen(1) ctx(≤32) F7`. Codes: `01` CONFIG_INVALID, `02` SYSEX_PARSE_ERROR, `03` ESPNOW_SEND_FAILED, `04` MESH_CLOCK_LOST_SYNC, `05` RECEIVER_TIMEOUT, `FF` UNKNOWN. |
 | `31` | LOG *(v2)* | `F0 7D 31 text(ASCII ≤100) F7`. One log line, only after `SET_LOG 1`. Non-ASCII bytes arrive as `?`. |
@@ -82,16 +86,30 @@ native little-endian.
 |------|--------|-----------|---------|
 | `MCK…` | `MeshClockPacket` (3-byte magic + 56-bit µs) | any → broadcast | ESPNowMeshClock, ~1 s ± 10 %. Handled first by `meshClock.handleReceive()`. |
 | `0x01` | `SenderBeacon { type }` | master → broadcast | 1 s. A slave registers the sender as a peer; sender entries time out after 5 s. |
-| `0x02` | `ReceiverInfo { type, layer[16], version[8], mediaIndex }` | slave → each known master, unicast | 1 s + 0–200 ms jitter. The master marks a slave *missing* after 5 s and drops it after 10 s. |
-| `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` | master → each connected slave on the layer, unicast | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
+| `0x02` | `ReceiverInfo { type, layer[16], version[8], mediaIndex }` *(2.0.1 appends `syncQuality u8`; v2.2 appends `syncGaps u16`)* | slave → each known master, unicast | 1 s + 0–200 ms jitter. The master marks a slave *missing* after 5 s and drops it after 10 s. |
+| `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(v2.2 appends `seq u16`)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
 | `0xF0…` | SysEx frame, mesh form of `CHANGE_RECEIVER_LAYER`: `F0 7D 11 layer(raw ASCII, unpadded) F7` | master → one slave | on demand. The slave stores the layer in NVS and re-announces itself. |
 | `0x04` | `MidiEvent` *(v2, reserved)* | master → slaves | Note / CC / PC relay scheduled on mesh time |
+| `0x05` | `MeshRelay { origin[6], seq u16, hop u8 }` + the original packet verbatim *(v2.2, reserved — #t-024)* | any node → broadcast | controlled flooding for out-of-range slaves. A **new type**, not a trailer on `0x03`: a v1.2 slave ignores an unknown type but *acts* on a longer `0x03`, and it cannot origin-lock. |
 
 ### Slave-side handling of `MediaSyncPacket`
 
 1. Drop unless `layer` matches the subscribed layer *(v2: or the subscribed layer is `*`)*.
-2. `delta = meshMillis() − meshTimestamp`. If `|delta| > 200 ms` the mesh clock is not
-   trusted yet: drop the packet (logged once per second).
+1b. *(v2.2 **ORIGIN LOCK**)* Drop unless the packet's **origin** is the master this node
+   follows. The first one heard is adopted; after that, another master is refused until the
+   held one has been silent for `ORIGIN_LOCK_RELEASE_MS`, or forever if `SET_ORIGIN` pinned
+   it. Under broadcast delivery nothing else keeps two installations in earshot apart — the
+   master's receiver table used to. The origin is a *parameter* of this path, not the recv
+   callback's `src_addr`: on `0x05` it is the envelope's, so a relayed copy of the locked
+   master's packet is still his.
+1c. *(v2.2)* Count the gap in `seq` against the last one accepted from this origin, unless it
+   exceeds `MEDIASYNC_MAX_GAP` (a master reboot or a lock switch — re-anchor, do not count).
+   The total goes back to the master in `ReceiverInfo.syncGaps`. Broadcast has no MAC-layer
+   ACK, so this counter, not `espnowTxFail`, is what names a slave that hears nothing.
+2. `delta = meshMillis() − meshTimestamp`. If `|delta| > 200 ms` the mesh clock is not trusted:
+   accept the packet **without compensation** and mark it *coarse* (logged once per second).
+   *(Dropping it here was the −69 s bug, fixed in 2.0.1: the master's index / position / state
+   are authoritative whatever the clocks say — a node loses precision, never correctness.)*
 3. If playing and `delta > 0`, `position += delta` (the packet aged in flight).
 4. Store index / position / state, reset the local clock base, clear *link lost*.
 5. Index changed (and ≠ 0) → send `CC#100 = index`. Playing → stopped → send `CC#100 = 0`.
@@ -101,7 +119,9 @@ native little-endian.
 
 Between packets the slave advances the position on its own clock and emits MTC
 at 30 fps. No packet for **10 s** while playing → *link lost*: stop the clock and
-send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling.
+send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling. *(v2.2: which one is a stored
+choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the build flag
+`NOWDE_STOP_ON_LINK_LOST` is now only the default for a node whose NVS has never been told.)*
 
 ### Timing constants (`nowde_config.h`)
 
@@ -113,6 +133,8 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling.
 | `CC100_REPEAT_INTERVAL_MS` | 1000 (0 disables) |
 | `LINK_LOST_TIMEOUT_MS` | 10 000 |
 | `CLOCK_DESYNC_THRESHOLD_MS` | 200 |
+| `ORIGIN_LOCK_RELEASE_MS` *(v2.2)* | 2000 (silence before an adopted lock may switch master) |
+| `MEDIASYNC_MAX_GAP` *(v2.2)* | 100 (largest `seq` jump still read as loss; 10 s at 10 Hz) |
 | `TRANSMISSION_DELAY_US` | 1300 (ESPNowMeshClock one-way estimate) |
 | `ESPNowMeshClock(...)` | interval 1000 ms, slew α 0.25, large step 10 ms, timeout 5 s, jitter 10 % |
 | `MAX_SENDERS` / `MAX_RECEIVERS` | 10 / 10 |

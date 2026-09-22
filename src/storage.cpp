@@ -62,6 +62,24 @@ bool loadLrFromEEPROM() {
   return v != 0;
 }
 
+// v2.2: freewheel vs stop on link loss is a stored choice, not a build. Absent key = the build's
+// default (NOWDE_STOP_ON_LINK_LOST), so `atoms3` still means "freewheel unless told otherwise".
+void saveLossPolicyToEEPROM(bool stop) {
+  preferences.begin("nowde", false);
+  preferences.putUChar("loss", stop ? 1 : 0);
+  preferences.end();
+  DEBUG_SERIAL.printf("[EEPROM] Loss policy saved: %s\r\n", stop ? "STOP" : "FREEWHEEL");
+}
+
+bool loadLossPolicyFromEEPROM() {
+  if (!preferences.begin("nowde", true)) {
+    return NOWDE_STOP_ON_LINK_LOST != 0;
+  }
+  uint8_t v = preferences.getUChar("loss", NOWDE_STOP_ON_LINK_LOST ? 1 : 0);
+  preferences.end();
+  return v != 0;
+}
+
 void clearEEPROM() {
   preferences.begin("nowde", false);
   preferences.clear();

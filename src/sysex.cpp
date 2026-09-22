@@ -406,6 +406,11 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.positionMs = positionMs;
         syncPacket.state = state;
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
+        // v2.2: the origin's frame counter. Free-running and wrapping at 16 bits -- slaves diff
+        // consecutive values to count what they missed (there is no ACK left to count), and
+        // #t-024 will dedup relayed copies on (origin, seq). Minted here, never re-stamped.
+        static uint16_t mediaSyncSeq = 0;
+        syncPacket.seq = ++mediaSyncSeq;
 
         // 2.0.2: remember what we are relaying so the master's own LCD/LED can show it.
         // Display only -- deliberately NOT mediaSyncState (see MasterRelayState).
@@ -414,19 +419,21 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         masterRelay.state = state;
         masterRelay.updatedAt = millis();
 
-        int sentCount = 0;
-#if NOWDE_MEDIASYNC_BROADCAST
-        // One frame for the whole fleet instead of one per slave. Receivers already filter on
-        // the layer they carry (receiver_mode.cpp), so nothing changes on their side and a v1.2
-        // receiver reads it too. This deletes the fan-out burst that was dropping the last peer,
-        // and cuts the master's airtime ~N-fold, which is what makes the LR PHY affordable.
+        // v2.2: ONE broadcast frame for the whole fleet. The per-slave esp_now_send() loop is
+        // gone, and with it the fan-out burst that silently dropped its last peers -- but the
+        // real change is that delivery no longer consults the receiver table at ALL. "Whoever
+        // hears, plays": slaves already filter on the packet's layer (receiver_mode.cpp), so a
+        // node that moves, arrives or goes needs no peer churn on the master, and a v1.2 slave
+        // reads this frame exactly as before. Airtime drops ~N-fold, which is what makes the LR
+        // PHY affordable. The table stays -- it is still how the master knows who is out there.
+        //
         // The trade: broadcast has no MAC-layer ACK and no retry, so a lost frame is simply
-        // lost -- covered here by the 10 Hz repeat and the slave regenerating MTC from the mesh
-        // clock, i.e. redundancy over time instead of retransmission per packet.
+        // lost -- covered by the 10 Hz repeat and the slave regenerating MTC from the mesh
+        // clock, i.e. redundancy over time instead of retransmission per packet. Detection is
+        // what actually had to be replaced, and it moved to the slaves: `seq` above, counted
+        // into ReceiverInfo.syncGaps and surfaced per-slave in RUNNING_STATE.
         if (!rfSimulationEnabled) {
-          if (relaySend(broadcastAddress, &syncPacket, sizeof(syncPacket)) == ESP_OK) {
-            sentCount = 1;
-          }
+          relaySend(broadcastAddress, &syncPacket, sizeof(syncPacket));
         } else {
           for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
             if (!delayedPackets[j].active) {
@@ -434,41 +441,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
               delayedPackets[j].packet = syncPacket;
               memcpy(delayedPackets[j].receiverMac, broadcastAddress, 6);
               delayedPackets[j].active = true;
-              sentCount = 1;
               break;
             }
           }
         }
-#else
-        for (int i = 0; i < MAX_RECEIVERS; i++) {
-          // Only send to CONNECTED receivers on matching layer
-          // Disconnected receivers (not sending info) are skipped to prevent blocking
-          if (receiverTable[i].active && receiverTable[i].connected &&
-              layerMatches(receiverTable[i].layer, targetLayer)) {
-            
-            if (!rfSimulationEnabled) {
-              // Result checked: see relaySend(). Dropping it here is what hid the dead slave.
-              if (relaySend(receiverTable[i].mac, &syncPacket, sizeof(syncPacket)) != ESP_OK) {
-                sentCount--;  // undo the optimistic count below
-              }
-            } else {
-              // RF simulation - add random delay
-              // Find free slot in delayed packets queue
-              for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
-                if (!delayedPackets[j].active) {
-                  unsigned long delayMs = random(0, rfSimMaxDelayMs + 1);
-                  delayedPackets[j].sendTime = millis() + delayMs;
-                  delayedPackets[j].packet = syncPacket;
-                  memcpy(delayedPackets[j].receiverMac, receiverTable[i].mac, 6);
-                  delayedPackets[j].active = true;
-                  break;
-                }
-              }
-            }
-            sentCount++;
-          }
-        }
-#endif
 
         // ESP-NOW TX logging disabled for media sync to reduce clutter
         // Sync packets sent every ~100ms but not logged
@@ -649,6 +625,53 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_LOSS_POLICY:
+      // v2.2 — Format: F0 7D 0D [stop: 0 freewheel / 1 stop] F7 ; what this node does when the
+      // MEDIA_SYNC stream dies. Stored in NVS and applied live -- unlike SET_LR there is no
+      // radio state to rebuild, so no restart. Which one a node wants is a property of where it
+      // stands (an audio loop in the open vs a video wall that must not run blind), so it stops
+      // being a build: `atoms3` still boots FREEWHEEL, the DevKit STOP, until a host says.
+      if (length >= 5 && (data[3] == 0 || data[3] == 1)) {
+        bool stop = data[3] == 1;
+        saveLossPolicyToEEPROM(stop);
+        mediaSyncState.stopOnLinkLost = stop;
+        DEBUG_SERIAL.printf("[SET_LOSS_POLICY] %s\r\n",
+                            stop ? "STOP (CC#100=0 + MIDI Stop)" : "FREEWHEEL");
+        sendConfigState();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
+    case SYSEX_CMD_SET_ORIGIN:
+      // v2.2 — Format: F0 7D 0E [mac(6 raw -> 7 encoded)] F7 pins the origin lock to that
+      // master; F0 7D 0E F7 (no mac) releases it and the next MEDIA_SYNC heard adopts its
+      // sender. This is the "or an explicit command" half of the lock: silence alone releases
+      // an adopted lock after ORIGIN_LOCK_RELEASE_MS, but a PINNED one is held through any
+      // silence -- which is what a deployment with two installations in earshot wants.
+      if (length == 4) {
+        originRelease();
+        DEBUG_SERIAL.println("[SET_ORIGIN] released — following the next master heard");
+        sendConfigState();
+      } else if (length >= 11) {
+        uint8_t mac[6];
+        if (decode7bit(&data[3], 7, mac) < 6) {
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+          break;
+        }
+        memcpy(originLock.mac, mac, 6);
+        originLock.valid = true;
+        originLock.pinned = true;
+        originLock.lastHeard = millis();
+        mediaSyncState.haveSeq = false;   // a different master's seq is not ours to diff
+        DEBUG_SERIAL.printf("[SET_ORIGIN] pinned to %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        sendConfigState();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
     case SYSEX_CMD_SET_LOCAL_LAYER:
       // v2 — Format: F0 7D 09 [layer ascii, 1..15 bytes] F7 ; sets THIS node's subscribed layer
       if (length >= 5) {
@@ -726,6 +749,14 @@ void sendHello() {
   // 2.0.3 trailer: the LR switch as this node runs it, so a fleet check reads the PHY mode of
   // every node from its host without opening a box (parsers before 2.0.3 ignore the byte).
   message[msgIdx++] = lrEnabled ? 1 : 0;
+  // v2.2 trailer: MEDIA_SYNC frames this node missed (14-bit, saturating). A slave never sends
+  // RUNNING_STATE, so this is the only way its OWN host sees the delivery signal -- the master
+  // sees the same number per slave in RUNNING_STATE.
+  {
+    uint16_t gaps = (mediaSyncState.syncGaps > 0x3FFF) ? 0x3FFF : mediaSyncState.syncGaps;
+    message[msgIdx++] = (gaps >> 7) & 0x7F;
+    message[msgIdx++] = gaps & 0x7F;
+  }
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
@@ -819,9 +850,12 @@ void sendSysExBytes(const uint8_t* message, int len) {
 
 void sendConfigState() {
   // Format: F0 7D 21 [rfSimEnabled] [rfSimMaxDelayHi(7-bit)] [rfSimMaxDelayLo(7-bit)]
-  //         [role(1)] [board(1)] [layerLen(1)] [layer ascii...] F7
-  // The first 7 bytes are the v1.2 frame; the rest is a v2 trailer older parsers skip.
-  uint8_t message[32];
+  //         [role(1)] [board(1)] [layerLen(1)] [layer ascii...]
+  //         [stopOnLinkLost(1)] [originValid(1)|2 if pinned] [originMac(6 raw -> 7 encoded)] F7
+  // The first 7 bytes are the v1.2 frame; the rest is a v2 trailer older parsers skip. The
+  // v2.2 tail is what makes the two runtime switches READABLE -- a loss policy or an origin
+  // lock nobody can query is a deployment choice you have to guess at from the field.
+  uint8_t message[48];
   int idx = 0;
   message[idx++] = SYSEX_START;
   message[idx++] = SYSEX_MANUFACTURER_ID;
@@ -837,6 +871,10 @@ void sendConfigState() {
   for (int i = 0; i < layerLen; i++) {
     message[idx++] = subscribedLayer[i] & 0x7F;
   }
+  // v2.2 trailer: the two runtime switches, read back.
+  message[idx++] = mediaSyncState.stopOnLinkLost ? 1 : 0;
+  message[idx++] = originLock.valid ? (originLock.pinned ? 2 : 1) : 0;
+  idx += encode7bit(originLock.mac, 6, &message[idx]);
   message[idx++] = SYSEX_END;
 
   sendSysExBytes(message, idx);
@@ -855,9 +893,11 @@ void sendRunningState() {
   
   // Format per chunk: F0 7D 22 [uptimeMs(4,encoded:5)] [meshSynced(1)]
   //   [totalReceivers(1)] [chunkIndex(1)] [chunkCount(1)] [chunkReceivers(1)]
-  //   For each receiver in this chunk: [receiverData(37 bytes, encoded:43)]
-  //   receiverData = mac(6) layer(16) version(8) lastSeenMs(4) active(1) mediaIndex(1) syncQuality(1)
-  //   (2.0.1 appended syncQuality; a pre-2.0.1 host reading 42 stops one byte short and ignores it)
+  //   For each receiver in this chunk: [receiverData(39 bytes, encoded:45)]
+  //   receiverData = mac(6) layer(16) version(8) lastSeenMs(4) active(1) mediaIndex(1)
+  //                  syncQuality(1) syncGaps(2, big-endian)
+  //   (2.0.1 appended syncQuality, v2.2 appended syncGaps; one receiver per chunk, so an older
+  //    host reading 42 or 43 bytes stops short of the tail and ignores it)
   //   F7
   // All multi-byte fields are 7-bit encoded to prevent 0x80-0xFF bytes in data
   
@@ -949,6 +989,10 @@ void sendRunningState() {
       rawData[rawIdx++] = 1;  // Active flag
       rawData[rawIdx++] = entry.mediaIndex;
       rawData[rawIdx++] = entry.syncQuality;   // 2.0.1: per-slave lock (NOWDE_SYNC_*)
+      // v2.2: what THIS slave reports it never received. Broadcast MEDIA_SYNC has no MAC ACK,
+      // so a rising number here is the only thing that still names a half-deaf node.
+      rawData[rawIdx++] = (entry.syncGaps >> 8) & 0xFF;
+      rawData[rawIdx++] = entry.syncGaps & 0xFF;
 
       int encodedLen = encode7bit(rawData, rawIdx, &message[msgIdx]);
       if (msgIdx + encodedLen >= 512) {
