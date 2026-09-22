@@ -8,7 +8,7 @@
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.3"
+#define NOWDE_VERSION "2.0.4"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -99,6 +99,8 @@
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
+// 2.0.4: same idea for the volume (CC#7): a host that just booted or relinked catches up within 1 s
+#define CC7_REPEAT_INTERVAL_MS 1000
 
 // What a slave does when the media-sync stream dies (LINK_LOST_TIMEOUT_MS with no packet
 // while playing):
@@ -205,7 +207,17 @@ struct MediaSyncPacket {
   uint32_t positionMs;
   uint8_t state;
   uint32_t meshTimestamp;
+  // 2.0.4 TAIL, appended at the end so a 2.0.3 receiver (which accepts any frame >= the 27-byte
+  // struct it knows and reads fixed offsets) ignores it. A 2.0.4 receiver reads the tail only when
+  // the frame is long enough, so master and slaves can be flashed in any order.
+  uint8_t volume;        // 0..100, the master's software level; meaningless unless flags bit0
+  uint8_t flags;         // bit0 = volume valid, bit1 = mute (reserved)
 } __attribute__((packed));
+
+// the 2.0.3 wire size of MediaSyncPacket: the acceptance threshold on the receiver side
+constexpr size_t MEDIA_SYNC_PACKET_V203_SIZE = 1 + MAX_LAYER_LENGTH + 1 + 4 + 1 + 4;
+constexpr uint8_t MEDIASYNC_FLAG_VOLUME = 0x01;
+constexpr uint8_t MEDIASYNC_FLAG_MUTE   = 0x02;
 
 struct SenderEntry {
   uint8_t mac[6];
@@ -247,6 +259,12 @@ struct MediaSyncState {
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;
   unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
+  // 2.0.4 master-driven volume (absolute): the last level received from the master and the last one
+  // sent to the host as CC#7. 255 = never received -> nothing is ever sent to the host, so a fleet
+  // whose master does not carry a volume behaves exactly like 2.0.3.
+  uint8_t currentVolume = 255;
+  uint8_t lastSentVolume = 255;
+  unsigned long lastCC7SendTime = 0;
   // 2.0.1: set when the last accepted MEDIA_SYNC was accepted WITHOUT mesh-clock compensation
   // (|meshNow - meshTimestamp| > CLOCK_DESYNC_THRESHOLD_MS). Position still follows the master;
   // only sub-frame precision is dropped. Drives the sync-quality signal and the re-sync self-heal.
