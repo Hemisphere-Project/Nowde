@@ -8,7 +8,7 @@
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.3"
+#define NOWDE_VERSION "2.0.4"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -118,6 +118,8 @@
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
+// 2.0.4: same idea for the volume (CC#7): a host that just booted or relinked catches up within 1 s
+#define CC7_REPEAT_INTERVAL_MS 1000
 
 // What a slave does when the media-sync stream dies (LINK_LOST_TIMEOUT_MS with no packet
 // while playing):
@@ -240,16 +242,35 @@ struct MediaSyncPacket {
   uint32_t positionMs;
   uint8_t state;
   uint32_t meshTimestamp;
+  // 2.0.4 TAIL, appended at the end so a 2.0.3 receiver (which accepts any frame >= the 27-byte
+  // struct it knows and reads fixed offsets) ignores it. A 2.0.4 receiver reads the tail only when
+  // the frame is long enough, so master and slaves can be flashed in any order.
+  uint8_t volume;        // 0..100, the master's software level; meaningless unless flags bit0
+  uint8_t flags;         // bit0 = volume valid, bit1 = mute (reserved)
   uint16_t seq;         // v2.2 trailer: the ORIGIN's frame counter, free-running, wraps at
                         // 16 bits. Two readers: the slave counts the gaps in it (there is no
                         // ACK left to count), and #t-024 dedups relayed copies on (origin, seq)
                         // — which is why it is minted by the master and never re-stamped.
 } __attribute__((packed));
+// THREE generations in one frame, each field appended, so each has its own read threshold.
+// The ORDER is a wire decision, not a merge artefact: 2.0.4's tail keeps the offsets it already
+// has on `main` (27, 28), and v2.2's `seq` goes after it. The other way round, a 2.0.4-flashed
+// node reading a v2.2 master at its fixed offsets would take the two halves of `seq` for a
+// volume and a flags byte — a CC#7 of noise. Neither tail is fielded yet (the posted fleet is
+// 2.0.3), so cross-version safety is the only thing left to decide it by.
+//
 // The v1.2 floor: `type..meshTimestamp`, 27 B. A v1.2 slave tests `len < sizeof(its own 27 B
 // struct)`, i.e. strictly less, so it accepts the longer frame and ignores the tail — the
 // additive-trailer pattern the v1.2 wire charter §(b) blesses. Ours does the same in reverse:
-// a 27-byte frame from a pre-v2.2 master is accepted with no seq (see processMediaSyncPacket).
-#define MEDIA_SYNC_MIN_LEN ((int)offsetof(MediaSyncPacket, seq))
+// a shorter frame from an older master is accepted for what it carries.
+// Read every threshold OFF THE STRUCT (offsetof, packed), never hand-counted: this very merge
+// is the edit that would have made a hand-written 27 wrong.
+#define MEDIA_SYNC_MIN_LEN    ((int)offsetof(MediaSyncPacket, volume))  // v1.2 / 2.0.3 floor, 27 B
+#define MEDIA_SYNC_VOLUME_LEN ((int)offsetof(MediaSyncPacket, seq))     // 2.0.4 tail read from, 29 B
+// sizeof(MediaSyncPacket) == 31 B: the full v2.2 frame, `seq` included.
+
+constexpr uint8_t MEDIASYNC_FLAG_VOLUME = 0x01;
+constexpr uint8_t MEDIASYNC_FLAG_MUTE   = 0x02;
 
 struct SenderEntry {
   uint8_t mac[6];
@@ -304,6 +325,12 @@ struct MediaSyncState {
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;
   unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
+  // 2.0.4 master-driven volume (absolute): the last level received from the master and the last one
+  // sent to the host as CC#7. 255 = never received -> nothing is ever sent to the host, so a fleet
+  // whose master does not carry a volume behaves exactly like 2.0.3.
+  uint8_t currentVolume = 255;
+  uint8_t lastSentVolume = 255;
+  unsigned long lastCC7SendTime = 0;
   // 2.0.1: set when the last accepted MEDIA_SYNC was accepted WITHOUT mesh-clock compensation
   // (|meshNow - meshTimestamp| > CLOCK_DESYNC_THRESHOLD_MS). Position still follows the master;
   // only sub-frame precision is dropped. Drives the sync-quality signal and the re-sync self-heal.

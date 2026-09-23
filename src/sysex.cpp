@@ -384,12 +384,21 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
                               (static_cast<uint32_t>(positionBytes[2]) << 8) |
                               static_cast<uint32_t>(positionBytes[3]);
         uint8_t state = data[25];
+        // 2.0.4 tail: volume + flags. A 2.0.3 host sends 27 bytes and never gets here with
+        // length >= 29, so volume stays "absent" and nothing is relayed for it.
+        uint8_t volume = 0, mflags = 0;
+        if (length >= 29) {
+          volume = data[26] & 0x7F;
+          mflags = data[27] & 0x7F;
+        }
         uint32_t meshTimestamp = meshMillisStable();
 
         // Only log media sync on state changes or media index changes
         static uint8_t lastState = 255;
         static uint8_t lastIndex = 255;
-        bool shouldLog = (state != lastState) || (mediaIndex != lastIndex);
+        static uint8_t lastVol = 255;
+        uint8_t volForLog = (mflags & MEDIASYNC_FLAG_VOLUME) ? volume : 255;
+        bool shouldLog = (state != lastState) || (mediaIndex != lastIndex) || (volForLog != lastVol);
         
         if (shouldLog) {
           DEBUG_SERIAL.printf("[MEDIA SYNC] Layer='%s', Index=%d, Pos=%lu ms, State=%s, MeshTime=%lu\r\n",
@@ -397,6 +406,11 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
                              state == 1 ? "playing" : "stopped", meshTimestamp);
           lastState = state;
           lastIndex = mediaIndex;
+          if (volForLog != lastVol) {
+            DEBUG_SERIAL.printf("[MEDIA SYNC] Volume=%s\r\n",
+                                volForLog == 255 ? "(not carried)" : String(volForLog).c_str());
+            lastVol = volForLog;
+          }
         }
 
         MediaSyncPacket syncPacket;
@@ -406,6 +420,8 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.positionMs = positionMs;
         syncPacket.state = state;
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
+        syncPacket.volume = volume;
+        syncPacket.flags = mflags;
         // v2.2: the origin's frame counter. Free-running and wrapping at 16 bits -- slaves diff
         // consecutive values to count what they missed (there is no ACK left to count), and
         // #t-024 will dedup relayed copies on (origin, seq). Minted here, never re-stamped.

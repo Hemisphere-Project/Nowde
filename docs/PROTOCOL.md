@@ -52,7 +52,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 
 | Cmd | Name | Frame | Effect |
 |-----|------|-------|--------|
-| `10` | MEDIA_SYNC | `F0 7D 10 layer(16 raw ASCII, NUL-padded) index(1) position(4→5) state(1) F7` — 27 bytes | Master stamps `meshMillis()`, mints a `seq`, and sends **one broadcast** `MediaSyncPacket` *(v2.2 — it was one unicast per connected slave on `layer`)*. `position` = milliseconds, big-endian u32 before encoding. `state`: `0` stopped, `1` playing. Send at ~10 Hz while playing; one frame with `state=0` to stop. |
+| `10` | MEDIA_SYNC | `F0 7D 10 layer(16 raw ASCII, NUL-padded) index(1) position(4→5) state(1) [volume(1) flags(1)] F7` — 27 bytes, 29 with the *(2.0.4)* volume tail | Master stamps `meshMillis()`, mints a `seq`, and sends **one broadcast** `MediaSyncPacket` *(v2.2 — it was one unicast per connected slave on `layer`)*. `position` = milliseconds, big-endian u32 before encoding. `state`: `0` stopped, `1` playing. `volume` 0..100 absolute, carried only when `flags` bit0 is set; a 27-byte frame means *no volume* and nothing is relayed for it. Send at ~10 Hz while playing; one frame with `state=0` to stop. |
 | `11` | CHANGE_RECEIVER_LAYER | host form: `F0 7D 11 mac(6→7) layer(16→19) F7` — 29 bytes | Master looks the slave up by MAC and forwards the mesh form (below). `ERROR_REPORT 05` if the MAC is unknown. |
 
 ### Node → host (`0x20`–`0x3F`)
@@ -87,7 +87,7 @@ native little-endian.
 | `MCK…` | `MeshClockPacket` (3-byte magic + 56-bit µs) | any → broadcast | ESPNowMeshClock, ~1 s ± 10 %. Handled first by `meshClock.handleReceive()`. |
 | `0x01` | `SenderBeacon { type }` | master → broadcast | 1 s. A slave registers the sender as a peer; sender entries time out after 5 s. |
 | `0x02` | `ReceiverInfo { type, layer[16], version[8], mediaIndex }` *(2.0.1 appends `syncQuality u8`; v2.2 appends `syncGaps u16`)* | slave → each known master, unicast | 1 s + 0–200 ms jitter. The master marks a slave *missing* after 5 s and drops it after 10 s. |
-| `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(v2.2 appends `seq u16`)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
+| `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(2.0.4 appends `volume u8`, `flags u8` → 29 B; v2.2 appends `seq u16` → 31 B, **in that order**: 2.0.4 shipped first, so its offsets are fixed and `seq` goes after)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
 | `0xF0…` | SysEx frame, mesh form of `CHANGE_RECEIVER_LAYER`: `F0 7D 11 layer(raw ASCII, unpadded) F7` | master → one slave | on demand. The slave stores the layer in NVS and re-announces itself. |
 | `0x04` | `MidiEvent` *(v2, reserved)* | master → slaves | Note / CC / PC relay scheduled on mesh time |
 | `0x05` | `MeshRelay { origin[6], seq u16, hop u8 }` + the original packet verbatim *(v2.2, reserved — #t-024)* | any node → broadcast | controlled flooding for out-of-range slaves. A **new type**, not a trailer on `0x03`: a v1.2 slave ignores an unknown type but *acts* on a longer `0x03`, and it cannot origin-lock. |
@@ -116,6 +116,8 @@ native little-endian.
    While playing, re-send `CC#100 = index` every 1 s. *(v2)* First packet since boot with
    index 0 / stopped → `CC#100 = 0` + Stop once, so a host follows the master's state from
    the first contact (a player that started its own content at boot goes silent).
+5b. *(2.0.4)* Frame ≥ 29 B and `flags` bit0 set → send `CC#7 = volume` on change, then every
+   1 s while it holds. A master that carries no volume leaves the host's level alone.
 
 Between packets the slave advances the position on its own clock and emits MTC
 at 30 fps. No packet for **10 s** while playing → *link lost*: stop the clock and
@@ -131,6 +133,7 @@ choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the bui
 | `SENDER_TIMEOUT_MS` / `RECEIVER_TIMEOUT_MS` | 5000 (missing), 10 000 (removed) |
 | `MTC_FRAMERATE` | 30 fps |
 | `CC100_REPEAT_INTERVAL_MS` | 1000 (0 disables) |
+| `CC7_REPEAT_INTERVAL_MS` *(2.0.4)* | 1000 (0 disables) |
 | `LINK_LOST_TIMEOUT_MS` | 10 000 |
 | `CLOCK_DESYNC_THRESHOLD_MS` | 200 |
 | `ORIGIN_LOCK_RELEASE_MS` *(v2.2)* | 2000 (silence before an adopted lock may switch master) |
@@ -143,6 +146,8 @@ choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the bui
 
 - **`CC#100`, channel 1**: media index `1..127`, `0` = stop. Repeated every second
   while playing.
+- *(2.0.4)* **`CC#7`, channel 1**: the master's absolute volume, `0..100`, only when the
+  frame carries one. Sent on change, repeated every second.
 - **MTC quarter-frames** (`F1 0n`…`F1 7n`), 30 fps non-drop (rate code 3): all eight
   pieces are sent back to back every 1/30 s, so a host that reassembles on piece 7
   gets a full timecode 30 times a second. Hours wrap at 24.

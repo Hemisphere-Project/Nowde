@@ -60,10 +60,14 @@ void sendReceiverInfo() {
 
 void processMediaSyncPacket(const uint8_t* origin, const uint8_t* data, int len) {
   // v2.2: the floor is the v1.2 frame, not our own struct — a pre-v2.2 master sends 27 bytes
-  // with no `seq` and must still be followed. Only the trailer read below is length-gated.
+  // with neither tail and must still be followed. Every trailer read below is length-gated,
+  // per generation: 2.0.4's volume at MEDIA_SYNC_VOLUME_LEN, v2.2's `seq` at the full size.
   if (len < MEDIA_SYNC_MIN_LEN) {
     return;
   }
+  // 2.0.4: its own threshold, NOT sizeof() any more — a 2.0.4 master sends 29 bytes and its
+  // volume must still reach the host from a v2.2 slave.
+  const bool hasVolume = (len >= MEDIA_SYNC_VOLUME_LEN);
 
   const MediaSyncPacket* syncPacket = reinterpret_cast<const MediaSyncPacket*>(data);
 
@@ -165,6 +169,24 @@ void processMediaSyncPacket(const uint8_t* origin, const uint8_t* data, int len)
 
   if (jumped) {
     midiSendFullFrame(compensatedPositionMs);
+  }
+
+  // 2.0.4 master-driven volume (absolute): every packet carries the master's level, so a lost frame
+  // costs nothing. Tell the host only when it changes, then repeat once a second (like CC#100) so a
+  // host that booted or relinked catches up. Never send anything if the master carries no volume.
+  if (hasVolume && (syncPacket->flags & MEDIASYNC_FLAG_VOLUME)) {
+    uint8_t v = syncPacket->volume > 100 ? 100 : syncPacket->volume;
+    mediaSyncState.currentVolume = v;
+    if (v != mediaSyncState.lastSentVolume) {
+      midiSendCC7(v);
+      mediaSyncState.lastSentVolume = v;
+      mediaSyncState.lastCC7SendTime = now;
+      DEBUG_SERIAL.printf("[MEDIA SYNC] Volume -> %d (CC#7)\r\n", v);
+    } else if (CC7_REPEAT_INTERVAL_MS > 0 &&
+               (now - mediaSyncState.lastCC7SendTime) >= CC7_REPEAT_INTERVAL_MS) {
+      midiSendCC7(v);
+      mediaSyncState.lastCC7SendTime = now;
+    }
   }
 
   // Handle state transitions

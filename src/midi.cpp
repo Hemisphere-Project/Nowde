@@ -31,14 +31,22 @@ void midiInit() {
   MIDI.begin();
 }
 
-void midiSendCC100(uint8_t value) {
+void midiSendCC(uint8_t cc, uint8_t value) {
   midiEventPacket_t p;
   p.header = 0x0B;          // CIN: control change
   p.byte1 = 0xB0;           // channel 1
-  p.byte2 = 100;
+  p.byte2 = cc & 0x7F;
   p.byte3 = value & 0x7F;
   midiWritePacket(p);
-  DEBUG_SERIAL.printf("[MIDI TX] CC#100 = %d (channel 1)\r\n", value);
+  DEBUG_SERIAL.printf("[MIDI TX] CC#%d = %d (channel 1)\r\n", cc, value);
+}
+
+void midiSendCC100(uint8_t value) {
+  midiSendCC(100, value);
+}
+
+void midiSendCC7(uint8_t value) {
+  midiSendCC(7, value);
 }
 
 void midiSendTimeCode(uint32_t positionMs) {
