@@ -33,6 +33,11 @@ RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT',
                  8: 'DEEPSLEEP', 9: 'BROWNOUT', 10: 'SDIO', 11: 'USB', 12: 'JTAG',
                  13: 'EFUSE', 14: 'PWR_GLITCH', 15: 'CPU_LOCKUP'}
 
+# 2.0.4 MEDIA_SYNC flags byte — mirrors src/nowde_config.h. Bit1 is reserved on the wire
+# and does nothing yet: the firmware reads it into MediaSyncPacket.flags and acts on bit0 only.
+MEDIASYNC_FLAG_VOLUME = 0x01
+MEDIASYNC_FLAG_MUTE = 0x02
+
 
 def encode7(raw):
     out = []
@@ -115,10 +120,19 @@ def set_origin(mac=None):
     return [MANUFACTURER, CMD_SET_ORIGIN] + encode7(list(mac))
 
 
-def media_sync(layer, index, position_ms, playing):
+def media_sync(layer, index, position_ms, playing, volume=None, flags=None):
+    """2.0.4: pass `volume` (0..100 absolute) to append the two-byte tail — 27 bytes becomes 29,
+    and `flags` defaults to MEDIASYNC_FLAG_VOLUME so the node acts on it. Leave both out and the
+    frame is the 2.0.3 one byte for byte, which the firmware reads as *no volume carried* and
+    leaves the host's level alone (src/sysex.cpp reads data[26]/data[27] only at length >= 29).
+    The v2.2 `seq` is NOT here: the master mints it for the mesh packet, the host never sends it."""
     index = max(0, min(127, int(index)))
-    return ([MANUFACTURER, CMD_MEDIA_SYNC] + layer16(layer) + [index]
-            + encode7(u32be(max(0, int(position_ms)))) + [1 if playing else 0])
+    frame = ([MANUFACTURER, CMD_MEDIA_SYNC] + layer16(layer) + [index]
+             + encode7(u32be(max(0, int(position_ms)))) + [1 if playing else 0])
+    if volume is None and flags is None:
+        return frame
+    f = MEDIASYNC_FLAG_VOLUME if flags is None else int(flags)
+    return frame + [max(0, min(100, int(volume or 0))) & 0x7F, f & 0x7F]
 
 
 def change_receiver_layer(mac, layer):
@@ -261,8 +275,14 @@ def parse(data):
     if cmd == CMD_ERROR_REPORT and len(d) >= 2:
         return name, {'error': ERROR_NAMES.get(d[0], hex(d[0])), 'ctx': ' '.join('%02X' % b for b in d[2:2 + d[1]])}
     if cmd == CMD_MEDIA_SYNC and len(d) >= 23:
-        return name, {'layer': bytes(d[0:16]).decode('ascii', 'ignore').rstrip('\x00'), 'index': d[16],
-                      'position_ms': from_u32be(decode7(d[17:22])), 'playing': d[22] == 1}
+        info = {'layer': bytes(d[0:16]).decode('ascii', 'ignore').rstrip('\x00'), 'index': d[16],
+                'position_ms': from_u32be(decode7(d[17:22])), 'playing': d[22] == 1}
+        if len(d) >= 25:
+            # 2.0.4 tail, reported as it sits on the wire: `volume` is only meaningful when
+            # `flags` bit0 is set, and that reading belongs to the caller, not the parser.
+            info['volume'] = d[23]
+            info['flags'] = d[24]
+        return name, info
     if cmd == CMD_CHANGE_RECEIVER_LAYER and len(d) >= 26:
         return name, {'mac': ':'.join('%02X' % b for b in decode7(d[0:7])),
                       'layer': bytes(decode7(d[7:26])).decode('ascii', 'ignore').rstrip('\x00')}

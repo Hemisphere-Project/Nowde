@@ -19,6 +19,23 @@ ms = [0xF0] + nx.media_sync('hplayer2', 7, 0xDEADBEEF, True) + [0xF7]
 check(len(ms) == 27 and ms[19] == 7 and ms[25] == 1, "MEDIA_SYNC layout")
 check(nx.parse(ms[1:-1])[1] == {'layer': 'hplayer2', 'index': 7, 'position_ms': 0xDEADBEEF, 'playing': True}, "MEDIA_SYNC parse")
 
+# 2.0.4 — the volume tail. Offsets are asserted against src/sysex.cpp, which reads data[26]
+# and data[27] and only at length >= 29; the 27-byte form above must stay byte-identical,
+# because that is the whole mixed-fleet compatibility claim (a 2.0.3 host keeps driving a
+# 2.0.4 node, and a 2.0.4 host carrying no volume leaves a node's level alone).
+msv = [0xF0] + nx.media_sync('hplayer2', 7, 0xDEADBEEF, True, volume=55) + [0xF7]
+check(len(msv) == 29 and msv[26] == 55 and msv[27] == nx.MEDIASYNC_FLAG_VOLUME, f"MEDIA_SYNC 2.0.4 tail {msv[26:28]}")
+check(msv[:26] == ms[:26], "MEDIA_SYNC 2.0.4 tail is appended, head untouched")
+check(all(b < 0x80 for b in msv[1:-1]), "MEDIA_SYNC 2.0.4 tail is 7-bit safe")
+check(nx.parse(msv[1:-1])[1] == {'layer': 'hplayer2', 'index': 7, 'position_ms': 0xDEADBEEF,
+                                 'playing': True, 'volume': 55, 'flags': 1}, f"MEDIA_SYNC 2.0.4 parse {nx.parse(msv[1:-1])[1]}")
+# "No volume carried" must be distinguishable from "volume 0", or a silent master mutes the fleet.
+check('volume' not in nx.parse(ms[1:-1])[1], "MEDIA_SYNC 27-byte frame carries no volume")
+check(nx.parse(nx.media_sync('l', 1, 0, True, volume=0))[1]['volume'] == 0, "MEDIA_SYNC volume 0 is carried")
+# The firmware clamps to 100 on the node side; the builder must not emit what it would clamp.
+check(nx.media_sync('l', 1, 0, True, volume=255)[-2] == 100, "MEDIA_SYNC volume clamps to 100")
+check(nx.media_sync('l', 1, 0, True, flags=nx.MEDIASYNC_FLAG_MUTE)[-1] == 2, "MEDIA_SYNC explicit flags")
+
 crl = [0xF0] + nx.change_receiver_layer([1, 2, 3, 4, 5, 6], 'stage') + [0xF7]
 check(len(crl) == 30, "CHANGE_RECEIVER_LAYER length")
 check(nx.parse(crl[1:-1])[1] == {'mac': '01:02:03:04:05:06', 'layer': 'stage'}, "CHANGE_RECEIVER_LAYER parse")
