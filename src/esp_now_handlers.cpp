@@ -81,8 +81,15 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       break;
 
     case ESPNOW_MSG_MEDIA_SYNC:
-      if (receiverModeEnabled) {
-        processMediaSyncPacket(data, len);
+      // v2.2: `!senderModeEnabled` is new, and it is not a tidy-up. Receiver mode is ALWAYS on,
+      // master included; under unicast that was harmless because nobody addressed a frame to a
+      // master. Broadcast delivers to everyone in earshot, so without this a second master in
+      // the room would be followed by the first -- origin-locking onto it and emitting its
+      // position as MTC to its own host. A node that drives the mesh does not follow it.
+      if (receiverModeEnabled && !senderModeEnabled) {
+        // Direct path: the sender IS the origin. #t-024's ESPNOW_MSG_MESH_RELAY case will pass
+        // the envelope's origin instead — src_addr there is the relayer, not the master.
+        processMediaSyncPacket(info->src_addr, data, len);
       }
       break;
 

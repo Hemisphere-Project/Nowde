@@ -14,6 +14,8 @@ CMD_OTA_END = 0x07
 CMD_SET_ROLE = 0x08
 CMD_SET_LOCAL_LAYER = 0x09
 CMD_SET_LOG = 0x0A
+CMD_SET_LOSS_POLICY = 0x0D
+CMD_SET_ORIGIN = 0x0E
 CMD_MEDIA_SYNC = 0x10
 CMD_CHANGE_RECEIVER_LAYER = 0x11
 CMD_HELLO = 0x20
@@ -99,6 +101,20 @@ def set_log(on):
     return [MANUFACTURER, CMD_SET_LOG, 1 if on else 0]
 
 
+def set_loss_policy(stop):
+    """v2.2: what this node does when the MEDIA_SYNC stream dies — stop, or freewheel.
+    Stored in NVS and applied live (no restart, unlike SET_LR)."""
+    return [MANUFACTURER, CMD_SET_LOSS_POLICY, 1 if stop else 0]
+
+
+def set_origin(mac=None):
+    """v2.2: pin the origin lock to `mac` (6 bytes), or release it when mac is None —
+    the released node then follows the next master it hears."""
+    if mac is None:
+        return [MANUFACTURER, CMD_SET_ORIGIN]
+    return [MANUFACTURER, CMD_SET_ORIGIN] + encode7(list(mac))
+
+
 def media_sync(layer, index, position_ms, playing):
     index = max(0, min(127, int(index)))
     return ([MANUFACTURER, CMD_MEDIA_SYNC] + layer16(layer) + [index]
@@ -123,28 +139,43 @@ def ota_end():
 
 # ---- node -> host -----------------------------------------------------------------
 
-def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None):
-    """Build a HELLO payload (for simulators). sync_quality is the 2.0.1 trailer byte."""
+def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
+          lr=None, sync_gaps=None):
+    """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
+    needs the ones before it: sync_quality (2.0.1), lr (2.0.3), sync_gaps (v2.2, 14-bit)."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
     if role is not None:
         out += [int(role) & 0x7F, int(board or 0) & 0x7F]
         if sync_quality is not None:
             out += [int(sync_quality) & 0x7F]
+            if lr is not None:
+                out += [1 if lr else 0]
+                if sync_gaps is not None:
+                    g = max(0, min(0x3FFF, int(sync_gaps)))
+                    out += [(g >> 7) & 0x7F, g & 0x7F]
     return out
 
 
-def config_state(rf_sim=False, delay_ms=400, role=None, board=None, layer=None):
+def config_state(rf_sim=False, delay_ms=400, role=None, board=None, layer=None,
+                 stop_on_link_lost=None, origin=None, origin_pinned=False):
+    """v2.2 tail: the two runtime switches read back. `origin` is a 6-byte MAC or None
+    (= following nobody yet); origin_pinned marks a lock a host set with SET_ORIGIN."""
     out = [MANUFACTURER, CMD_CONFIG_STATE, 1 if rf_sim else 0, (delay_ms >> 7) & 0x7F, delay_ms & 0x7F]
     if role is not None:
         lb = list(str(layer or '').encode('ascii')[:15])
         out += [int(role) & 0x7F, int(board or 0) & 0x7F, len(lb)] + lb
+        if stop_on_link_lost is not None:
+            out += [1 if stop_on_link_lost else 0]
+            out += [(2 if origin_pinned else 1) if origin else 0]
+            out += encode7(list(origin or [0] * 6))
     return out
 
 
 def running_state_chunks(receivers, uptime_ms=1000, synced=True):
-    """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index, sync_quality}.
-    One chunk each. sync_quality (2.0.1) defaults to LOCKED (2)."""
+    """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index, sync_quality,
+    sync_gaps}. One chunk each. sync_quality (2.0.1) defaults to LOCKED (2); sync_gaps (v2.2,
+    u16 big-endian) defaults to 0."""
     chunks = []
     n = len(receivers)
     count = max(1, n)
@@ -152,10 +183,12 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True):
         d = [MANUFACTURER, CMD_RUNNING_STATE] + encode7(u32be(uptime_ms)) + [1 if synced else 0, n, ci, count]
         if ci < n:
             r = receivers[ci]
+            gaps = max(0, min(0xFFFF, int(r.get('sync_gaps', 0))))
             raw = (list(r['mac']) + layer16(r.get('layer', '-'))
                    + list(str(r.get('version', '2.0')).encode('ascii')[:8].ljust(8, b'\x00'))
                    + u32be(int(r.get('last_seen_ms', 0)))
-                   + [1, int(r.get('index', 0)) & 0x7F, int(r.get('sync_quality', 2)) & 0x7F])
+                   + [1, int(r.get('index', 0)) & 0x7F, int(r.get('sync_quality', 2)) & 0x7F,
+                      (gaps >> 8) & 0xFF, gaps & 0xFF])
             d += [1] + encode7(raw)
         else:
             d += [0]
@@ -188,6 +221,10 @@ def parse(data):
             info['board'] = BOARD_NAMES.get(d[17], '?')
         if len(d) >= 19:
             info['sync_quality'] = d[18]   # 2.0.1: NOWDE_SYNC_* (0 none, 1 coarse, 2 locked)
+        if len(d) >= 20:
+            info['lr'] = bool(d[19])       # 2.0.3: the long-range PHY switch as this node runs it
+        if len(d) >= 22:
+            info['sync_gaps'] = (d[20] << 7) | d[21]   # v2.2: MEDIA_SYNC frames this node missed
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}
@@ -195,14 +232,20 @@ def parse(data):
             info['role'] = ROLE_NAMES.get(d[3], '?')
             info['board'] = BOARD_NAMES.get(d[4], '?')
             info['layer'] = bytes(d[6:6 + d[5]]).decode('ascii', 'ignore')
+            tail = 6 + d[5]                # v2.2 trailer sits after the variable-length layer
+            if len(d) >= tail + 9:
+                info['stop_on_link_lost'] = bool(d[tail])
+                info['origin_pinned'] = d[tail + 1] == 2
+                info['origin'] = (':'.join('%02X' % b for b in decode7(d[tail + 2:tail + 9])[:6])
+                                  if d[tail + 1] else None)
         return name, info
     if cmd == CMD_RUNNING_STATE and len(d) >= 10:
         info = {'uptime_ms': from_u32be(decode7(d[0:5])), 'synced': bool(d[5]), 'total': d[6],
                 'chunk': d[7], 'chunks': d[8], 'receivers': []}
         idx = 10
         for _ in range(d[9]):
-            r = decode7(d[idx:idx + 43])   # 2.0.1: 37 raw -> 43 encoded (was 36 -> 42)
-            idx += 43
+            r = decode7(d[idx:idx + 45])   # v2.2: 39 raw -> 45 encoded (2.0.1 was 37 -> 43)
+            idx += 45
             if len(r) < 36:
                 break
             info['receivers'].append({
@@ -210,7 +253,8 @@ def parse(data):
                 'layer': bytes(r[6:22]).decode('ascii', 'ignore').rstrip('\x00'),
                 'version': bytes(r[22:30]).decode('ascii', 'ignore').rstrip('\x00'),
                 'last_seen_ms': from_u32be(r[30:34]), 'index': r[35],
-                'sync_quality': r[36] if len(r) >= 37 else 0xFF})   # 2.0.1
+                'sync_quality': r[36] if len(r) >= 37 else 0xFF,     # 2.0.1
+                'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0})   # v2.2
         return name, info
     if cmd == CMD_LOG:
         return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}
@@ -226,4 +270,10 @@ def parse(data):
         return name, {'role': ROLE_NAMES.get(d[0], '?')}
     if cmd == CMD_SET_LOCAL_LAYER:
         return name, {'layer': bytes(d).decode('ascii', 'ignore')}
+    if cmd == CMD_SET_LOSS_POLICY and len(d) >= 1:
+        return name, {'policy': 'stop' if d[0] else 'freewheel'}
+    if cmd == CMD_SET_ORIGIN:
+        if len(d) >= 7:
+            return name, {'origin': ':'.join('%02X' % b for b in decode7(d[0:7])[:6])}
+        return name, {'origin': None}   # no mac = release the lock
     return name, {'raw': ' '.join('%02X' % b for b in d)}

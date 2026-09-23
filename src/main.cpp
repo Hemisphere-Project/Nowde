@@ -347,9 +347,12 @@ void setup() {
   esp_wifi_set_channel(NOWDE_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d%s\r\n", NOWDE_WIFI_CHANNEL,
                       lrEnabled ? " [LR]" : "");
-  // Printed on every boot so the policy is checkable on site without reading the binary.
+  // v2.2: the policy is a stored choice (SET_LOSS_POLICY), so the LIVE value is the one worth
+  // printing — printing the build flag here would now be a lie on any node a host has set.
+  // Still printed on every boot so it is checkable on site without reading the binary.
+  mediaSyncState.stopOnLinkLost = loadLossPolicyFromEEPROM();
   DEBUG_SERIAL.printf("[INIT] Link loss: %s\r\n",
-                      NOWDE_STOP_ON_LINK_LOST ? "STOP (CC#100=0 + MIDI Stop)" : "FREEWHEEL");
+                      mediaSyncState.stopOnLinkLost ? "STOP (CC#100=0 + MIDI Stop)" : "FREEWHEEL");
 
   if (esp_now_init() != ESP_OK) {
     DEBUG_SERIAL.println("[ERROR] ESP-NOW init failed!");

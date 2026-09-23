@@ -8,7 +8,7 @@
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.3"
+#define NOWDE_VERSION "2.0.4"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -86,19 +86,40 @@
 #ifndef NOWDE_LR_RATE
   #define NOWDE_LR_RATE WIFI_PHY_RATE_LORA_250K
 #endif
-// Relay MEDIA_SYNC as ONE broadcast frame instead of one unicast per slave. Receivers already
-// filter on the packet's layer, so this needs no receiver change. Removes the fan-out burst
-// (and the class of bug where one peer silently gets nothing), and cuts master airtime ~N-fold
-// -- the thing that makes LR affordable. Costs the MAC-layer ACK/retry that unicast gives:
-// frame loss is then covered by the 10 Hz repeat, not by the radio. Off by default until the
-// bench says otherwise; env `atoms3-bcast` builds it on.
-#ifndef NOWDE_MEDIASYNC_BROADCAST
-  #define NOWDE_MEDIASYNC_BROADCAST 0
+// v2.2: MEDIA_SYNC is ONE broadcast frame, always. It used to be one unicast per slave,
+// pre-filtered by the master's receiver table, then (2.0.3) a build flag. Receivers already
+// filter on the packet's layer, so this needs no receiver change -- measured on the bench
+// 2026-09-04: 201 frames to all five slaves at one fifth of the sends, receivers untouched.
+// Delivery no longer consults the receiver table at all ("whoever hears, plays"), which is
+// what lets nodes move without ESP-NOW peer churn, and cuts master airtime ~N-fold -- the
+// thing that makes the LR PHY affordable.
+//
+// The price is the MAC-layer ACK/retry that unicast gave: a lost frame is simply lost, and
+// `espnowTxFail` goes blind on this path. Time-redundancy (the 10 Hz repeat + the slave
+// regenerating MTC from the mesh clock) covers the loss; the DETECTION moves receiver-side,
+// to the sequence-gap counter below. The receiver table stays -- it is still how the master
+// knows who is out there and what they report -- it is just no longer a delivery filter.
+
+// v2.2 ORIGIN LOCK: a slave follows ONE master MAC and ignores every other, switching only
+// after this much silence from the one it holds (or on an explicit SET_ORIGIN). Without it,
+// broadcast delivery means a `*` slave standing between two installations alternates between
+// them -- the receiver table used to be what kept them apart.
+#ifndef ORIGIN_LOCK_RELEASE_MS
+  #define ORIGIN_LOCK_RELEASE_MS 2000
+#endif
+
+// v2.2 gap counting: the largest jump in MEDIA_SYNC `seq` still read as lost frames. Anything
+// beyond it is a master reboot or a lock switch (seq restarts at 0), so the slave re-anchors
+// silently instead of charging thousands of phantom losses to the counter. 100 = 10 s at 10 Hz.
+#ifndef MEDIASYNC_MAX_GAP
+  #define MEDIASYNC_MAX_GAP 100
 #endif
 
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
+// 2.0.4: same idea for the volume (CC#7): a host that just booted or relinked catches up within 1 s
+#define CC7_REPEAT_INTERVAL_MS 1000
 
 // What a slave does when the media-sync stream dies (LINK_LOST_TIMEOUT_MS with no packet
 // while playing):
@@ -108,8 +129,13 @@
 //                    the position when it returns. A 10 s RF gap costs a few ms of drift
 //                    instead of an audible stop.
 // Freewheel is the right call for a long audio loop in the open (foliage fades come and go);
-// stop is right for a video wall that must not run blind. Env `atoms3` ships FREEWHEEL, the
-// DevKit / v1.2 baseline keeps STOP. Boot log prints which one is live.
+// stop is right for a video wall that must not run blind.
+//
+// v2.2: this is only the DEFAULT for a node whose NVS carries no `loss` key. The live switch is
+// SET_LOSS_POLICY (0x0D) over USB, stored in NVS and applied without a restart -- same shape as
+// SET_LR (2.0.3), because which of the two a node wants is a property of where it is installed,
+// not of the binary it runs. Env `atoms3` still defaults to FREEWHEEL, the DevKit / v1.2
+// baseline to STOP. Boot log prints which one is live.
 #ifndef NOWDE_STOP_ON_LINK_LOST
   #define NOWDE_STOP_ON_LINK_LOST 1
 #endif
@@ -143,6 +169,8 @@
 #define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B on(0/1) F7 — store the LR switch in NVS, HELLO, restart
 #define SYSEX_CMD_OTA_DATA_ACKED 0x0C    // 2.0.3: F0 7D 0C seq(7-bit) len(raw bytes) [data 7-bit] F7 — written only if
                                          // the decoded length matches, answered by OTA_ACK seq status (stop-and-wait)
+#define SYSEX_CMD_SET_LOSS_POLICY 0x0D   // v2.2: F0 7D 0D stop(0/1) F7 — freewheel vs stop on link loss, NVS, live
+#define SYSEX_CMD_SET_ORIGIN 0x0E        // v2.2: F0 7D 0E [mac(6) 7-bit → 7] F7 pins the origin lock; no mac = release it
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10
@@ -175,6 +203,11 @@
                                          // Locate record 0 at hdrLen and stride by recLen -- never
                                          // by sizeof: that is what keeps the charter's append-only
                                          // rule workable on a frame whose tail is an array.
+#define ESPNOW_MSG_MESH_RELAY 0x05       // v2.2: reserved for #t-024 — { origin[6], seq u16, hop u8 } + the
+                                         // original packet verbatim. A NEW TYPE, never a trailer on 0x03: a
+                                         // v1.2 slave ignores an unknown type but ACTS on a longer 0x03, and
+                                         // it cannot origin-lock, so a trailer relay would hand it foreign
+                                         // masters from the whole flooding radius. See the #t-020 note.
 
 // ============= DATA STRUCTURES =============
 struct SenderBeacon {
@@ -199,10 +232,14 @@ struct ReceiverInfo {
   uint8_t mediaIndex;   // Current playing media index (0 = stopped)
   uint8_t syncQuality;  // 2.0.1 trailer: NOWDE_SYNC_* — the slave's own lock, so the master
                         // can count who is actually delivering, not just who is alive.
+  uint16_t syncGaps;    // v2.2 trailer: MEDIA_SYNC frames this slave never received, counted
+                        // from gaps in the master's `seq`. Broadcast has no MAC ACK, so this
+                        // IS the silent-slave detector `espnowTxFail` used to be. Saturates.
 } __attribute__((packed));
-// Wire-compat: the byte is appended. A pre-2.0.1 slave sends the shorter packet; accept it
-// (see handleReceiverInfo) and treat syncQuality as UNKNOWN.
-#define RECEIVER_INFO_MIN_LEN ((int)offsetof(ReceiverInfo, syncQuality))
+// Wire-compat: every field above is appended, so each generation has its own floor and a
+// shorter packet is read for what it carries (see handleReceiverInfo) rather than dropped.
+#define RECEIVER_INFO_MIN_LEN     ((int)offsetof(ReceiverInfo, syncQuality))  // pre-2.0.1
+#define RECEIVER_INFO_QUALITY_LEN ((int)offsetof(ReceiverInfo, syncGaps))     // 2.0.1..2.0.3
 
 struct MediaSyncPacket {
   uint8_t type = ESPNOW_MSG_MEDIA_SYNC;
@@ -211,7 +248,35 @@ struct MediaSyncPacket {
   uint32_t positionMs;
   uint8_t state;
   uint32_t meshTimestamp;
+  // 2.0.4 TAIL, appended at the end so a 2.0.3 receiver (which accepts any frame >= the 27-byte
+  // struct it knows and reads fixed offsets) ignores it. A 2.0.4 receiver reads the tail only when
+  // the frame is long enough, so master and slaves can be flashed in any order.
+  uint8_t volume;        // 0..100, the master's software level; meaningless unless flags bit0
+  uint8_t flags;         // bit0 = volume valid, bit1 = mute (reserved)
+  uint16_t seq;         // v2.2 trailer: the ORIGIN's frame counter, free-running, wraps at
+                        // 16 bits. Two readers: the slave counts the gaps in it (there is no
+                        // ACK left to count), and #t-024 dedups relayed copies on (origin, seq)
+                        // — which is why it is minted by the master and never re-stamped.
 } __attribute__((packed));
+// THREE generations in one frame, each field appended, so each has its own read threshold.
+// The ORDER is a wire decision, not a merge artefact: 2.0.4's tail keeps the offsets it already
+// has on `main` (27, 28), and v2.2's `seq` goes after it. The other way round, a 2.0.4-flashed
+// node reading a v2.2 master at its fixed offsets would take the two halves of `seq` for a
+// volume and a flags byte — a CC#7 of noise. Neither tail is fielded yet (the posted fleet is
+// 2.0.3), so cross-version safety is the only thing left to decide it by.
+//
+// The v1.2 floor: `type..meshTimestamp`, 27 B. A v1.2 slave tests `len < sizeof(its own 27 B
+// struct)`, i.e. strictly less, so it accepts the longer frame and ignores the tail — the
+// additive-trailer pattern the v1.2 wire charter §(b) blesses. Ours does the same in reverse:
+// a shorter frame from an older master is accepted for what it carries.
+// Read every threshold OFF THE STRUCT (offsetof, packed), never hand-counted: this very merge
+// is the edit that would have made a hand-written 27 wrong.
+#define MEDIA_SYNC_MIN_LEN    ((int)offsetof(MediaSyncPacket, volume))  // v1.2 / 2.0.3 floor, 27 B
+#define MEDIA_SYNC_VOLUME_LEN ((int)offsetof(MediaSyncPacket, seq))     // 2.0.4 tail read from, 29 B
+// sizeof(MediaSyncPacket) == 31 B: the full v2.2 frame, `seq` included.
+
+constexpr uint8_t MEDIASYNC_FLAG_VOLUME = 0x01;
+constexpr uint8_t MEDIASYNC_FLAG_MUTE   = 0x02;
 
 struct SenderEntry {
   uint8_t mac[6];
@@ -228,6 +293,19 @@ struct ReceiverEntry {
   bool connected;
   uint8_t mediaIndex;   // Current playing media index (0 = stopped)
   uint8_t syncQuality = NOWDE_SYNC_UNKNOWN;  // 2.0.1: last reported by the slave (NOWDE_SYNC_*)
+  uint16_t syncGaps = 0;                     // v2.2: MEDIA_SYNC frames this slave says it missed
+};
+
+// v2.2 ORIGIN LOCK (slave side). Which master this node follows, and when it was last heard.
+// The MAC is a PARAMETER of the sync path, not the recv callback's src_addr: once #t-024 relays
+// MediaSync, a copy of master M's packet arrives from relayer R, and a lock reading src_addr
+// would reject exactly the moving-node case flooding exists for. Direct path: src_addr.
+// Relayed path (#t-024): the envelope's `origin`. Same parameter, two sources.
+struct OriginLock {
+  uint8_t mac[6] = {0};
+  bool valid = false;            // false = following nobody yet; the next MEDIA_SYNC adopts
+  bool pinned = false;           // SET_ORIGIN: held by the host, never released by silence
+  unsigned long lastHeard = 0;   // millis() of the last packet accepted from `mac`
 };
 
 // 2.0.2: what a MASTER last relayed, for the UI only. The relay path never touches
@@ -253,10 +331,23 @@ struct MediaSyncState {
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;
   unsigned long lastCC100SendTime = 0;    // Last time CC#100 was sent
+  // 2.0.4 master-driven volume (absolute): the last level received from the master and the last one
+  // sent to the host as CC#7. 255 = never received -> nothing is ever sent to the host, so a fleet
+  // whose master does not carry a volume behaves exactly like 2.0.3.
+  uint8_t currentVolume = 255;
+  uint8_t lastSentVolume = 255;
+  unsigned long lastCC7SendTime = 0;
   // 2.0.1: set when the last accepted MEDIA_SYNC was accepted WITHOUT mesh-clock compensation
   // (|meshNow - meshTimestamp| > CLOCK_DESYNC_THRESHOLD_MS). Position still follows the master;
   // only sub-frame precision is dropped. Drives the sync-quality signal and the re-sync self-heal.
   bool coarse = false;
+  // v2.2 receiver-side delivery signal. Broadcast MEDIA_SYNC has no MAC-layer ACK, so the master
+  // cannot tell a slave that hears nothing from one that hears everything. The slave counts what
+  // IT missed, from the gaps in the origin's `seq`, and reports the total in ReceiverInfo.
+  // Re-anchored (not counted) on a lock switch or a master reboot — see MEDIASYNC_MAX_GAP.
+  uint16_t lastSeq = 0;
+  bool haveSeq = false;    // false = nothing to diff against yet (first frame, or re-anchored)
+  uint16_t syncGaps = 0;   // saturating: a counter that wrapped would read as a healthy slave
 };
 
 constexpr uint8_t MTC_FRAMERATE = 30;

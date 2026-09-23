@@ -44,6 +44,9 @@ void sendReceiverInfo() {
   info.mediaIndex = mediaSyncState.currentIndex;
   // 2.0.1: report our own lock quality so the master counts who is actually delivering.
   info.syncQuality = nodeSyncQuality();
+  // v2.2: and how many MEDIA_SYNC frames we never got. Under broadcast this is what tells the
+  // master a slave is half-deaf -- it hears this node's beacons either way.
+  info.syncGaps = mediaSyncState.syncGaps;
 
   for (int i = 0; i < MAX_SENDERS; i++) {
     if (senderTable[i].active) {
@@ -55,15 +58,45 @@ void sendReceiverInfo() {
   // Info packets are sent every ~1s but not logged
 }
 
-void processMediaSyncPacket(const uint8_t* data, int len) {
-  if (len < static_cast<int>(sizeof(MediaSyncPacket))) {
+void processMediaSyncPacket(const uint8_t* origin, const uint8_t* data, int len) {
+  // v2.2: the floor is the v1.2 frame, not our own struct — a pre-v2.2 master sends 27 bytes
+  // with neither tail and must still be followed. Every trailer read below is length-gated,
+  // per generation: 2.0.4's volume at MEDIA_SYNC_VOLUME_LEN, v2.2's `seq` at the full size.
+  if (len < MEDIA_SYNC_MIN_LEN) {
     return;
   }
+  // 2.0.4: its own threshold, NOT sizeof() any more — a 2.0.4 master sends 29 bytes and its
+  // volume must still reach the host from a v2.2 slave.
+  const bool hasVolume = (len >= MEDIA_SYNC_VOLUME_LEN);
 
   const MediaSyncPacket* syncPacket = reinterpret_cast<const MediaSyncPacket*>(data);
 
   if (!layerMatches(subscribedLayer, syncPacket->layer)) {
     return;
+  }
+
+  // v2.2 ORIGIN LOCK. Broadcast delivery no longer asks the master's receiver table who should
+  // hear this, so the filter that kept two installations apart has to live here.
+  if (!originAccepts(origin)) {
+    return;
+  }
+
+  // v2.2 delivery signal: count what we missed, before anything can return early. The master
+  // has no ACK to count under broadcast, so this counter is the only silent-slave detector.
+  if (len >= static_cast<int>(sizeof(MediaSyncPacket))) {
+    uint16_t seq = syncPacket->seq;
+    if (mediaSyncState.haveSeq) {
+      uint16_t gap = static_cast<uint16_t>(seq - mediaSyncState.lastSeq - 1);
+      if (gap > 0 && gap <= MEDIASYNC_MAX_GAP) {
+        uint32_t total = static_cast<uint32_t>(mediaSyncState.syncGaps) + gap;
+        mediaSyncState.syncGaps = (total > 0xFFFF) ? 0xFFFF : static_cast<uint16_t>(total);
+        DEBUG_SERIAL.printf("[MEDIA SYNC] missed %u frame(s) (seq %u -> %u, %u total)\r\n",
+                            gap, mediaSyncState.lastSeq, seq, mediaSyncState.syncGaps);
+      }
+      // gap > MEDIASYNC_MAX_GAP: the master rebooted or we just switched lock. Re-anchor.
+    }
+    mediaSyncState.lastSeq = seq;
+    mediaSyncState.haveSeq = true;
   }
 
   uint32_t currentMeshTime = meshMillisStable();
@@ -136,6 +169,24 @@ void processMediaSyncPacket(const uint8_t* data, int len) {
 
   if (jumped) {
     midiSendFullFrame(compensatedPositionMs);
+  }
+
+  // 2.0.4 master-driven volume (absolute): every packet carries the master's level, so a lost frame
+  // costs nothing. Tell the host only when it changes, then repeat once a second (like CC#100) so a
+  // host that booted or relinked catches up. Never send anything if the master carries no volume.
+  if (hasVolume && (syncPacket->flags & MEDIASYNC_FLAG_VOLUME)) {
+    uint8_t v = syncPacket->volume > 100 ? 100 : syncPacket->volume;
+    mediaSyncState.currentVolume = v;
+    if (v != mediaSyncState.lastSentVolume) {
+      midiSendCC7(v);
+      mediaSyncState.lastSentVolume = v;
+      mediaSyncState.lastCC7SendTime = now;
+      DEBUG_SERIAL.printf("[MEDIA SYNC] Volume -> %d (CC#7)\r\n", v);
+    } else if (CC7_REPEAT_INTERVAL_MS > 0 &&
+               (now - mediaSyncState.lastCC7SendTime) >= CC7_REPEAT_INTERVAL_MS) {
+      midiSendCC7(v);
+      mediaSyncState.lastCC7SendTime = now;
+    }
   }
 
   // Handle state transitions

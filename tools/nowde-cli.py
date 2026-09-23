@@ -163,8 +163,11 @@ def cmd_slaves(a):
         print(f"mesh clock {'SYNCED' if synced else 'not synced'} · {len(rows)} slave(s) · {locked} LOCKED")
         for r in rows:
             q = qname.get(r.get('sync_quality', 0xFF), '?')
+            # v2.2: `missed` is what replaced the MAC ACK. Broadcast MEDIA_SYNC gets no
+            # per-frame feedback, so a slave that hears half the fleet's traffic looks
+            # perfectly healthy on every other column here.
             print(f"  {r['mac']}  lock={q:<6} layer={r['layer']:<16} v{r['version']:<6} "
-                  f"index={r['index']:<3} seen {r['last_seen_ms']} ms ago")
+                  f"index={r['index']:<3} missed={r.get('sync_gaps', 0):<5} seen {r['last_seen_ms']} ms ago")
     n.close()
 
 
@@ -179,6 +182,30 @@ def cmd_set_role(a):
 def cmd_set_layer(a):
     n = Node(a.port)
     n.send(nx.set_local_layer(a.layer), f'SET_LOCAL_LAYER {a.layer}')
+    n.wait_for(nx.CMD_CONFIG_STATE)
+    time.sleep(0.3)
+    n.close()
+
+
+def cmd_set_loss(a):
+    """v2.2: freewheel vs stop on link loss, without a reflash."""
+    n = Node(a.port)
+    n.send(nx.set_loss_policy(a.policy == 'stop'), f'SET_LOSS_POLICY {a.policy}')
+    n.wait_for(nx.CMD_CONFIG_STATE)
+    time.sleep(0.3)
+    n.close()
+
+
+def cmd_set_origin(a):
+    """v2.2: pin this slave to one master, or release it. Under broadcast delivery nothing
+    else keeps two installations in earshot of each other apart."""
+    mac = None
+    if a.mac and a.mac != 'release':
+        mac = [int(x, 16) for x in a.mac.replace('-', ':').split(':')]
+        if len(mac) != 6:
+            sys.exit("MAC must be 6 hex bytes, e.g. A0:B1:C2:D3:E4:F5 (or `release`)")
+    n = Node(a.port)
+    n.send(nx.set_origin(mac), f'SET_ORIGIN {a.mac or "release"}')
     n.wait_for(nx.CMD_CONFIG_STATE)
     time.sleep(0.3)
     n.close()
@@ -269,6 +296,8 @@ def main():
     sp.add_parser('slaves').set_defaults(f=cmd_slaves)
     r = sp.add_parser('set-role'); r.add_argument('role', choices=['master', 'slave', 'auto']); r.set_defaults(f=cmd_set_role)
     l = sp.add_parser('set-layer'); l.add_argument('layer'); l.set_defaults(f=cmd_set_layer)
+    lp = sp.add_parser('set-loss'); lp.add_argument('policy', choices=['stop', 'freewheel']); lp.set_defaults(f=cmd_set_loss)
+    og = sp.add_parser('set-origin'); og.add_argument('mac', nargs='?', help='master MAC, or `release`'); og.set_defaults(f=cmd_set_origin)
     g = sp.add_parser('assign'); g.add_argument('mac'); g.add_argument('layer'); g.set_defaults(f=cmd_assign)
     y = sp.add_parser('play'); y.add_argument('index', type=int); y.add_argument('-l', '--layer', default='hplayer2')
     y.add_argument('-d', '--duration', type=float, default=60.0, help='loop length in s')
