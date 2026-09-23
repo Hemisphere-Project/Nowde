@@ -30,6 +30,7 @@
 #include <freertos/task.h>
 
 #include "esp_now_handlers.h"
+#include "mesh_relay.h"
 #include "midi.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
@@ -268,6 +269,10 @@ void espnowTask(void* parameter) {
       // 2.0.1: repair a stranded mesh clock (soft reset, then bounded reboot) while COARSE.
       meshResyncTick();
     }
+
+    // v2.2 controlled flooding (#t-024): fires regardless of role -- relaying extends OTHER
+    // nodes' reach, independent of whether this node also consumes or originates MediaSync.
+    processPendingRelays();
 
     meshClock.loop();
     uiTick();

@@ -90,7 +90,7 @@ native little-endian.
 | `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(2.0.4 appends `volume u8`, `flags u8` → 29 B; v2.2 appends `seq u16` → 31 B, **in that order**: 2.0.4 shipped first, so its offsets are fixed and `seq` goes after)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
 | `0xF0…` | SysEx frame, mesh form of `CHANGE_RECEIVER_LAYER`: `F0 7D 11 layer(raw ASCII, unpadded) F7` | master → one slave | on demand. The slave stores the layer in NVS and re-announces itself. |
 | `0x04` | `MidiEvent` *(v2, reserved)* | master → slaves | Note / CC / PC relay scheduled on mesh time |
-| `0x05` | `MeshRelay { origin[6], seq u16, hop u8 }` + the original packet verbatim *(v2.2, reserved — #t-024)* | any node → broadcast | controlled flooding for out-of-range slaves. A **new type**, not a trailer on `0x03`: a v1.2 slave ignores an unknown type but *acts* on a longer `0x03`, and it cannot origin-lock. |
+| `0x05` | `MeshRelayHeader { origin[6], seq u16, hop u8 }` (10 B) + the original packet verbatim *(v2.2 — #t-024)* | any node → broadcast | controlled flooding for out-of-range / moving slaves. A **new type**, not a trailer on `0x03`: a v1.2 slave ignores an unknown type but *acts* on a longer `0x03`, and it cannot origin-lock. |
 
 ### Slave-side handling of `MediaSyncPacket`
 
@@ -125,6 +125,27 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling. *(v2.2: which one is
 choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the build flag
 `NOWDE_STOP_ON_LINK_LOST` is now only the default for a node whose NVS has never been told.)*
 
+### Controlled flooding (`0x05` `MeshRelayHeader`, v2.2 — #t-024)
+
+Relays `MediaSyncPacket` only (v2.2 scope; see the #t-020 note for why beacons/`ReceiverInfo`
+are excluded — both key off `info->src_addr`, which a relayed frame does not preserve).
+Any node, whatever its role, that hears a `0x03` (hop implicitly 0) or a `0x05` (hop = the
+envelope's) may re-broadcast it wrapped one hop further, **unless**:
+
+- it is the packet's own origin (never relay your own traffic);
+- this exact `(origin, seq)` has already been forwarded, scheduled, or suppressed — the dedup
+  key, taken from the inner packet's own `seq` (never re-minted on relay, so it doubles as the
+  receiver's gap-counter key); or
+- forwarding would stamp `hop > MAX_HOPS`.
+
+A scheduled forward waits a random `MESH_RELAY_DELAY_MIN_MS`–`MESH_RELAY_DELAY_MAX_MS` ms
+window, and is **cancelled** if another node's copy of the same `(origin, seq)` is heard first
+("if you hear someone else forward it first, drop yours" — topology note §(2)). The inner
+packet is copied **byte-verbatim**, never re-stamped: `meshTimestamp` stays the origin's, so a
+relayed copy's own compensation arithmetic (step 2 above) absorbs the relay delay for free —
+see the #t-020 note, *"Why the inner packet is copied verbatim"*. Dedup + hop limit make a
+flooding loop impossible by construction.
+
 ### Timing constants (`nowde_config.h`)
 
 | Constant | Value |
@@ -138,6 +159,8 @@ choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the bui
 | `CLOCK_DESYNC_THRESHOLD_MS` | 200 |
 | `ORIGIN_LOCK_RELEASE_MS` *(v2.2)* | 2000 (silence before an adopted lock may switch master) |
 | `MEDIASYNC_MAX_GAP` *(v2.2)* | 100 (largest `seq` jump still read as loss; 10 s at 10 Hz) |
+| `MAX_HOPS` *(v2.2, #t-024)* | 3 — frozen at the ratified range's upper bound (topology note §(2): "2–3"); small fleet, moving-node reach favoured over the extra ≤30 ms worst-case latency |
+| `MESH_RELAY_DELAY_MIN_MS` / `MESH_RELAY_DELAY_MAX_MS` *(v2.2, #t-024)* | 5 / 30 — random forward delay, unaffected by #t-009 (LR decided OFF 15/09, so the 1 Mbps default the ~6 % airtime figure was computed against still stands) |
 | `TRANSMISSION_DELAY_US` | 1300 (ESPNowMeshClock one-way estimate) |
 | `ESPNowMeshClock(...)` | interval 1000 ms, slew α 0.25, large step 10 ms, timeout 5 s, jitter 10 % |
 | `MAX_SENDERS` / `MAX_RECEIVERS` | 10 / 10 |
