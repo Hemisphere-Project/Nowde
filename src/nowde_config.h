@@ -147,6 +147,22 @@
 // window this is generous headroom, not a measured ceiling.
 #define MAX_PENDING_RELAYS 8
 
+// v2.3 FIXED LEAD (#t-039, topology note §(4): "fire-at mesh timestamps with a fixed lead"):
+// a sender picks fireAt = now + MIDI_EVENT_LEAD_MS (mesh time) so a MIDI_EVENT frame (0x04,
+// reserved below) has cleared its worst-case relay path -- MAX_HOPS hops, each up to
+// MESH_RELAY_DELAY_MAX_MS of randomized forward delay -- before that time is due. Derived, not
+// chosen, off the two frozen constants above: MAX_HOPS(3) x MESH_RELAY_DELAY_MAX_MS(30 ms) =
+// 90 ms -- the exact figure #t-024's own MAX_HOPS comment already worked out and named this
+// task for. A shorter lead fails silently: the event fires late, and only on the far side of a
+// hop. Mesh-clock error is NOT added on top -- ESPNowMeshClock's forward creep runs on the
+// order of 100s of µs per second, three orders of magnitude under this figure, so it cannot
+// move a millisecond-rounded derivation. Not yet consumed: the 0x04 receive/schedule path is
+// #t-037 / #t-038, both unlanded on `main` -- they read this constant once built. Overridable
+// per env like its inputs above.
+#ifndef MIDI_EVENT_LEAD_MS
+  #define MIDI_EVENT_LEAD_MS (MAX_HOPS * MESH_RELAY_DELAY_MAX_MS)
+#endif
+
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
