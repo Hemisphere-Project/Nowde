@@ -24,7 +24,9 @@
 // Retry just that error (it means "queue full", not "peer gone"), and report anything else.
 volatile uint32_t espnowRelayDropped = 0;
 
-static esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len) {
+// Declared in esp_now_handlers.h -- mesh_relay.cpp (#t-024) reuses this exact retry/telemetry
+// for the v2.2 controlled-flooding forward instead of a second copy of the same logic.
+esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len) {
   const uint8_t* payload = static_cast<const uint8_t*>(buf);
   esp_err_t r = esp_now_send(mac, payload, len);
   for (int tries = 0; r == ESP_ERR_ESPNOW_NO_MEM && tries < 3; tries++) {
