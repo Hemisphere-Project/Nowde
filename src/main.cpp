@@ -39,6 +39,7 @@
 #include "sysex.h"
 #include "ui.h"
 #include "usb_out.h"
+#include "watchdog.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -252,6 +253,20 @@ void espnowTask(void* parameter) {
         }
       }
 
+      // 2.0.5: bounded freewheel. Past NOWDE_FREEWHEEL_MAX_MS without a packet, stop the host exactly
+      // as the master-stopped edge does (receiver_mode.cpp) and drop to state 0, so the stream's return
+      // is a fresh start edge (CC#100=index + full-frame + Start, see processMediaSyncPacket). linkLost
+      // stays set until a packet clears it (LED red, HELLO linkLost=1), as after a STOP-policy stop.
+      if (mediaSyncState.currentState == 1 && mediaSyncState.linkLost &&
+          (now - mediaSyncState.lastSyncTime) >= NOWDE_FREEWHEEL_MAX_MS) {
+        DEBUG_SERIAL.printf("[LINK] freewheel > %lu s -> stop\r\n", (unsigned long)(NOWDE_FREEWHEEL_MAX_MS / 1000));
+        mediaSyncState.currentState = 0;
+        midiSendCC100(0);
+        midiSendStop();
+        mediaSyncState.lastSentIndex = 0;
+        mediaSyncState.lastCC100SendTime = now;
+      }
+
       // Continuous MTC clock generation when playing
       if (mediaSyncState.currentState == 1) {
         // Calculate current position based on local clock
@@ -265,9 +280,25 @@ void espnowTask(void* parameter) {
         }
       }
 
+      // 2.0.5: while stopped, repeat CC#100=0 once a second to a linked host -- the mirror of the 1 s
+      // CC#100=index repeat while playing (receiver_mode.cpp) -- so a host that missed the stop edge
+      // (USB gap, HPlayer2 restart) learns it within a second. Lives here, not in the packet handler,
+      // because the stop that matters most (freewheel bound above) happens with no packets arriving.
+      // Only once a stop has actually been sent (lastSentIndex == 0): a node that never heard its
+      // master says nothing, as before. One 3-byte CC, no SysEx.
+      if (CC100_REPEAT_INTERVAL_MS > 0 && mediaSyncState.currentState == 0 &&
+          mediaSyncState.lastSentIndex == 0 && hostLinked() &&
+          (now - mediaSyncState.lastCC100SendTime) >= CC100_REPEAT_INTERVAL_MS) {
+        midiSendCC100(0);
+        mediaSyncState.lastCC100SendTime = now;
+      }
+
       // 2.0.1: repair a stranded mesh clock (soft reset, then bounded reboot) while COARSE.
       meshResyncTick();
     }
+
+    // 2.0.5: radio watchdog -- master: relay NO_MEM streak / slave table drained; slave: no master.
+    watchdogTick(now);
 
     meshClock.loop();
     uiTick();
@@ -325,6 +356,9 @@ void setup() {
                         resyncRebootCount, MESH_MAX_AUTO_REBOOTS);
   }
 
+  // 2.0.5: radio watchdog record (RTC memory) -- before the HELLO, which carries its restart count.
+  watchdogInit();
+
   // Send HELLO to notify the host of boot/reboot
   sendHello();
 
@@ -360,6 +394,15 @@ void setup() {
   esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataRecv);
   DEBUG_SERIAL.println("[INIT] ESP-NOW callbacks registered");
+
+  // 2.0.5: no WiFi power save. arduino-esp32 starts the STA with WIFI_PS_MIN_MODEM; a node that
+  // never associates has nothing to save, and modem sleep is one moving part fewer in the radio
+  // driver that wedged twice in the field (every esp_now_send() ESP_ERR_ESPNOW_NO_MEM for 19 h).
+  esp_err_t psErr = esp_wifi_set_ps(WIFI_PS_NONE);
+  wifi_ps_type_t psNow = WIFI_PS_NONE;
+  esp_wifi_get_ps(&psNow);
+  DEBUG_SERIAL.printf("[INIT] WiFi power save: %s (set_ps %s)\r\n",
+                      psNow == WIFI_PS_NONE ? "NONE" : "ON", esp_err_to_name(psErr));
 
   addBroadcastPeer();
   logDeviceInfo();

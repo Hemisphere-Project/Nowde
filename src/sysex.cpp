@@ -15,6 +15,7 @@
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+#include "watchdog.h"
 
 
 // The media-sync relay used to fire one esp_now_send() per slave back-to-back and throw every
@@ -31,6 +32,8 @@ static esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len) {
     delay(1);  // let the WiFi task drain a slot; at 10 Hz this costs nothing we can measure
     r = esp_now_send(mac, payload, len);
   }
+  // 2.0.5: the radio watchdog counts a NO_MEM streak from here (field: NO_MEM on every send, 19 h).
+  watchdogRelayResult(r);
   if (r != ESP_OK) {
     espnowRelayDropped++;
     static unsigned long lastLog = 0;
@@ -742,6 +745,16 @@ void sendHello() {
   // 2.0.3 trailer: the LR switch as this node runs it, so a fleet check reads the PHY mode of
   // every node from its host without opening a box (parsers before 2.0.3 ignore the byte).
   message[msgIdx++] = lrEnabled ? 1 : 0;
+  // 2.0.5 trailer: the receive link as this node sees it -- linkLost (0/1), milliseconds since the
+  // last accepted MEDIA_SYNC as two 7-bit bytes (hi, lo; capped at 0x3FFF = 16.4 s, also 0x3FFF
+  // when none ever came), and the radio watchdog's restart count since power-on (0..127). Hosts
+  // read fixed offsets and ignore extra bytes (HPlayer2 parse_hello, nowde-hello.py).
+  unsigned long sinceSync = mediaSyncState.lastSyncTime ? (millis() - mediaSyncState.lastSyncTime) : 0x3FFFUL;
+  if (sinceSync > 0x3FFFUL) sinceSync = 0x3FFFUL;
+  message[msgIdx++] = mediaSyncState.linkLost ? 1 : 0;
+  message[msgIdx++] = (sinceSync >> 7) & 0x7F;
+  message[msgIdx++] = sinceSync & 0x7F;
+  message[msgIdx++] = watchdogRestartCount() & 0x7F;
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
