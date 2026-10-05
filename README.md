@@ -123,8 +123,11 @@ pio run -e esp32-s3-devkitc-1 -t upload      # flash (DevKit: use the UART port)
 pio device monitor -b 115200                 # logs
 ```
 
-Every build copies its binary to `bin/firmware-<env>.bin` (the DevKit env also keeps
-`bin/firmware.bin`, the name the MillluBridge OTA uploader expects).
+Every build copies its binary to `dist/firmware-<env>.bin` (the DevKit env also keeps
+`dist/firmware.bin`, the name the MillluBridge OTA uploader expects). `dist/` is
+gitignored. The committed `bin/` holds the **release** binaries and a build never
+touches it: at a release, copy the shipped envs from `dist/` into `bin/` in the
+release commit, and tag that commit.
 
 AtomS3 / AtomS3 Lite (env `atoms3`, one binary for both):
 
@@ -175,10 +178,11 @@ share a mesh. Tag `v1.2.0` is the last firmware that lived inside MillluBridge.
 ```
 platformio.ini      build envs (one per board)
 src/                firmware (main, sysex, midi, sender_mode, receiver_mode, storage)
-bin/                built binaries, consumed by the OTA uploader
+bin/                release binaries (committed at a release only), consumed by the OTA uploader
+dist/               build output, gitignored
 docs/PROTOCOL.md    SysEx commands, ESP-NOW packets, MIDI contract, byte layouts
 docs/HPLAYER2.md    how HPlayer2 uses a Nowde (slave and master legs)
-copy_firmware.py    post-build hook that fills bin/
+copy_firmware.py    post-build hook that fills dist/
 ```
 
 ## Roadmap
