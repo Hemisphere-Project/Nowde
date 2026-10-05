@@ -226,6 +226,9 @@
 
 // Nowde → Bridge Responses (0x20-0x3F)
 #define SYSEX_CMD_HELLO 0x20
+// v2.1 HELLO trailer: how many bytes of the app ELF SHA-256 (esp_app_desc_t.app_elf_sha256)
+// HELLO carries as the build identity. 8 bytes = 16 hex, a short sha for a fleet of tens.
+#define NOWDE_BUILD_ID_LEN 8
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23

@@ -24,6 +24,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
 #include <esp_mac.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -107,6 +108,11 @@ void logDeviceInfo() {
   DEBUG_SERIAL.println(WiFi.macAddress());
   DEBUG_SERIAL.print("Version: ");
   DEBUG_SERIAL.println(NOWDE_VERSION);
+  DEBUG_SERIAL.print("Build: ");            // v2.1: the HELLO buildId, as hex
+  for (int i = 0; i < NOWDE_BUILD_ID_LEN; i++) {
+    DEBUG_SERIAL.printf("%02x", esp_app_get_description()->app_elf_sha256[i]);
+  }
+  DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("================================");
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("Waiting for USB MIDI commands...");

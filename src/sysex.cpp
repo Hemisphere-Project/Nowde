@@ -6,6 +6,7 @@
 
 #include <esp_now.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
 #include <Update.h>
 
 #include "esp_now_handlers.h"
@@ -728,8 +729,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 // ============= HELPER FUNCTIONS =============
 
 void sendHello() {
-  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)] F7
-  // Sent on boot and on QUERY_CONFIG / SET_ROLE. role/board are v2 trailing fields.
+  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)]
+  //         [syncQuality(1)] [lr(1)] [syncGaps(2)] [buildId(8,encoded:10)] F7
+  // Sent on boot and on QUERY_CONFIG / SET_ROLE. Everything after bootReason is a trailing field,
+  // appended in release order (v2, 2.0.1, 2.0.3, v2.2, v2.1).
   
   uint8_t rawData[16];
   uint8_t message[64];
@@ -775,6 +778,11 @@ void sendHello() {
     message[msgIdx++] = (gaps >> 7) & 0x7F;
     message[msgIdx++] = gaps & 0x7F;
   }
+  // v2.1 trailer: build identity -- the head of the app ELF SHA-256 the build stamped into the app
+  // descriptor. `version` is a release string, so a bench build and a tagged one read alike on the
+  // wire; this tells them apart, and the same bytes sit at offset 0xB0 of the .bin, so a host checks
+  // a unit against a file instead of reflashing it to be sure (the 04/09 provisioning).
+  msgIdx += encode7bit(esp_app_get_description()->app_elf_sha256, NOWDE_BUILD_ID_LEN, &message[msgIdx]);
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
@@ -944,6 +952,10 @@ void sendRunningState() {
   unsigned long uptime = millis();
   SyncState syncState = meshClock.getSyncState();
   bool synced = (syncState == SyncState::SYNCED);
+  // v2.1: no slave listed AND the mesh clock has not heard one peer since boot. meshSynced=0 alone
+  // cannot say why; this splits "nobody to be in sync with" (a lone master -- a normal rack) from
+  // "had peers, lost them" (LOST -- a real fault), so a host can paint the first one neutral.
+  bool alone = (numActive == 0) && (syncState == SyncState::ALONE);
 
   // Only log summary when numActive changes or every 10 seconds
   static unsigned long lastLogTime = 0;
@@ -1019,6 +1031,12 @@ void sendRunningState() {
         return;
       }
       msgIdx += encodedLen;
+    }
+
+    // v2.1 trailer, on the empty-table chunk only. A chunk carrying a record never has it: a master
+    // listing a slave is not alone, and the record stays the frame's tail so it can keep growing.
+    if (chunkReceivers == 0) {
+      message[msgIdx++] = alone ? 1 : 0;
     }
 
     message[msgIdx++] = SYSEX_END;

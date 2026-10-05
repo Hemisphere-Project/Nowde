@@ -34,6 +34,24 @@ RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT',
                  13: 'EFUSE', 14: 'PWR_GLITCH', 15: 'CPU_LOCKUP'}
 
 
+BUILD_ID_LEN = 8          # v2.1: HELLO carries this many bytes of the app ELF SHA-256 (NOWDE_BUILD_ID_LEN)
+APP_DESC_MAGIC = 0xABCD5432
+APP_IMAGE_OFFSET = 0x10000  # where the app sits in a merged (bootloader + partitions + app) image
+
+
+def bin_build_id(image):
+    """The build identity a firmware image will report in HELLO, read without flashing it: the
+    head of `esp_app_desc_t.app_elf_sha256`, at +0x90 into the app descriptor, which opens the
+    first segment (image header 24 B + segment header 8 B = 0x20) -> file offset 0xB0. `image` =
+    bytes of an app .bin (bin/firmware-*.bin) or of a merged image. None if no descriptor."""
+    for base in (0, APP_IMAGE_OFFSET):
+        desc = base + 0x20
+        if (len(image) >= desc + 0x90 + BUILD_ID_LEN and image[base] == 0xE9
+                and int.from_bytes(image[desc:desc + 4], 'little') == APP_DESC_MAGIC):
+            return bytes(image[desc + 0x90:desc + 0x90 + BUILD_ID_LEN]).hex()
+    return None
+
+
 def encode7(raw):
     out = []
     for i in range(0, len(raw), 7):
@@ -140,9 +158,10 @@ def ota_end():
 # ---- node -> host -----------------------------------------------------------------
 
 def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
-          lr=None, sync_gaps=None):
+          lr=None, sync_gaps=None, build_id=None):
     """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
-    needs the ones before it: sync_quality (2.0.1), lr (2.0.3), sync_gaps (v2.2, 14-bit)."""
+    needs the ones before it: sync_quality (2.0.1), lr (2.0.3), sync_gaps (v2.2, 14-bit),
+    build_id (v2.1: BUILD_ID_LEN raw bytes, or their hex string)."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
     if role is not None:
@@ -154,6 +173,9 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
                 if sync_gaps is not None:
                     g = max(0, min(0x3FFF, int(sync_gaps)))
                     out += [(g >> 7) & 0x7F, g & 0x7F]
+                    if build_id is not None:
+                        b = bytes.fromhex(build_id) if isinstance(build_id, str) else bytes(build_id)
+                        out += encode7(list(b[:BUILD_ID_LEN].ljust(BUILD_ID_LEN, b'\x00')))
     return out
 
 
@@ -172,10 +194,11 @@ def config_state(rf_sim=False, delay_ms=400, role=None, board=None, layer=None,
     return out
 
 
-def running_state_chunks(receivers, uptime_ms=1000, synced=True):
+def running_state_chunks(receivers, uptime_ms=1000, synced=True, alone=None):
     """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index, sync_quality,
     sync_gaps}. One chunk each. sync_quality (2.0.1) defaults to LOCKED (2); sync_gaps (v2.2,
-    u16 big-endian) defaults to 0."""
+    u16 big-endian) defaults to 0. alone (v2.1) is appended to the empty-table chunk only;
+    None = a pre-2.1 node, which sends no such byte."""
     chunks = []
     n = len(receivers)
     count = max(1, n)
@@ -192,6 +215,8 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True):
             d += [1] + encode7(raw)
         else:
             d += [0]
+            if alone is not None:
+                d += [1 if alone else 0]
         chunks.append(d)
     return chunks
 
@@ -225,6 +250,8 @@ def parse(data):
             info['lr'] = bool(d[19])       # 2.0.3: the long-range PHY switch as this node runs it
         if len(d) >= 22:
             info['sync_gaps'] = (d[20] << 7) | d[21]   # v2.2: MEDIA_SYNC frames this node missed
+        if len(d) >= 32:
+            info['build_id'] = bytes(decode7(d[22:32])[:BUILD_ID_LEN]).hex()   # v2.1: app ELF SHA-256 head
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}
@@ -255,6 +282,8 @@ def parse(data):
                 'last_seen_ms': from_u32be(r[30:34]), 'index': r[35],
                 'sync_quality': r[36] if len(r) >= 37 else 0xFF,     # 2.0.1
                 'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0})   # v2.2
+        if d[9] == 0 and len(d) >= 11:
+            info['alone'] = bool(d[10])   # v2.1, empty-table chunk only: no peer heard since boot
         return name, info
     if cmd == CMD_LOG:
         return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}
