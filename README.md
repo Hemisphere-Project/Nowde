@@ -56,6 +56,12 @@ receivers emit.
 
 - **USB-MIDI port name** `Nowde - XXXXXX` (last three bytes of the MAC). Class
   compliant, no driver. VID `0x303A`, PID `0x8000`.
+- **On Linux the node is an ALSA `USB-Audio` card with no playback device.**
+  USB-MIDI is part of the USB audio class, so `/proc/asound/cards` lists it as
+  `USB-Audio - Nowde - XXXXXX`, with a `midi0` and no PCM. No descriptor the
+  firmware can set changes that. Host tooling that picks a sound card by grepping
+  `USB-Audio` will take the node for one (two hosts did, independently): select
+  audio outputs by the presence of a playback PCM, never by the class name.
 - **CC#100 on channel 1 = media index.** `1..127` selects a clip, `0` stops. The
   index is repeated every second while playing so a host that boots late catches
   up. What an index maps to is the host's business (HPlayer2 plays the file whose
@@ -87,7 +93,9 @@ a host needs:
 | host → node | `OTA_BEGIN / OTA_DATA / OTA_END` | firmware update over USB-MIDI |
 
 Any host that can send SysEx can be a master: the MillluBridge Python GUI, an
-HPlayer2 in master mode, a script built on `mido`.
+HPlayer2 in master mode, a script built on `mido`. A master enumerates exactly
+like a slave: same port name, same VID/PID, and the same ALSA `USB-Audio` card
+with no playback device (see the slave contract above).
 
 ## Hardware
 
