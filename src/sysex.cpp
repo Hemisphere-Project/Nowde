@@ -15,6 +15,7 @@
 #include "receiver_mode.h"
 #include "sender_mode.h"
 #include "storage.h"
+#include "host_clock.h"
 
 
 // The media-sync relay used to fire one esp_now_send() per slave back-to-back and throw every
@@ -120,6 +121,12 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
     return;  // Not a valid SysEx message
   }
   
+  // Universal real-time MTC full-frame: F0 7F 7F 01 01 hh mm ss ff F7 (v2.1 host MIDI in)
+  if (length == 10 && data[1] == 0x7F && data[2] == 0x7F && data[3] == 0x01 && data[4] == 0x01) {
+    hostClockOnFullFrame(data[5], data[6], data[7], data[8]);
+    return;
+  }
+
   // Silently ignore SysEx messages not for us (e.g., Universal SysEx 0x7E, system messages)
   if (length < 3 || data[1] != SYSEX_MANUFACTURER_ID) {
     return;
@@ -424,45 +431,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
         syncPacket.volume = volume;
         syncPacket.flags = mflags;
-        // v2.2: the origin's frame counter. Free-running and wrapping at 16 bits -- slaves diff
-        // consecutive values to count what they missed (there is no ACK left to count), and
-        // #t-024 will dedup relayed copies on (origin, seq). Minted here, never re-stamped.
-        static uint16_t mediaSyncSeq = 0;
-        syncPacket.seq = ++mediaSyncSeq;
-
-        // 2.0.2: remember what we are relaying so the master's own LCD/LED can show it.
-        // Display only -- deliberately NOT mediaSyncState (see MasterRelayState).
-        masterRelay.index = mediaIndex;
-        masterRelay.positionMs = positionMs;
-        masterRelay.state = state;
-        masterRelay.updatedAt = millis();
-
-        // v2.2: ONE broadcast frame for the whole fleet. The per-slave esp_now_send() loop is
-        // gone, and with it the fan-out burst that silently dropped its last peers -- but the
-        // real change is that delivery no longer consults the receiver table at ALL. "Whoever
-        // hears, plays": slaves already filter on the packet's layer (receiver_mode.cpp), so a
-        // node that moves, arrives or goes needs no peer churn on the master, and a v1.2 slave
-        // reads this frame exactly as before. Airtime drops ~N-fold, which is what makes the LR
-        // PHY affordable. The table stays -- it is still how the master knows who is out there.
-        //
-        // The trade: broadcast has no MAC-layer ACK and no retry, so a lost frame is simply
-        // lost -- covered by the 10 Hz repeat and the slave regenerating MTC from the mesh
-        // clock, i.e. redundancy over time instead of retransmission per packet. Detection is
-        // what actually had to be replaced, and it moved to the slaves: `seq` above, counted
-        // into ReceiverInfo.syncGaps and surfaced per-slave in RUNNING_STATE.
-        if (!rfSimulationEnabled) {
-          relaySend(broadcastAddress, &syncPacket, sizeof(syncPacket));
-        } else {
-          for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
-            if (!delayedPackets[j].active) {
-              delayedPackets[j].sendTime = millis() + random(0, rfSimMaxDelayMs + 1);
-              delayedPackets[j].packet = syncPacket;
-              memcpy(delayedPackets[j].receiverMac, broadcastAddress, 6);
-              delayedPackets[j].active = true;
-              break;
-            }
-          }
-        }
+        // `seq`, the master's display state and the v2.2 broadcast are shared with the v2.1
+        // MIDI-in path (host_clock.cpp), so they live in broadcastMediaSync() (sender_mode.cpp).
+        hostClockNoteSysExSync();   // SysEx keeps priority over MIDI-in (v2.1)
+        broadcastMediaSync(syncPacket);
 
         // ESP-NOW TX logging disabled for media sync to reduce clutter
         // Sync packets sent every ~100ms but not logged

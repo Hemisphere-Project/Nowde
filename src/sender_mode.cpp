@@ -254,3 +254,53 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
 
   (void)changed;
 }
+
+// The one way a master puts MediaSync on the air. Two sources feed it: the SysEx MEDIA_SYNC
+// handler (sysex.cpp) and the v2.1 MIDI-in host clock (host_clock.cpp); the caller fills
+// everything up to `flags`, this stamps the rest. One function, because both must share:
+//   - ONE `seq` counter. Relayers dedup on (origin, seq) and slaves count the gaps in it, so a
+//     second counter on the same master would hand out numbers the first already used, and
+//     a relayer would drop those frames as copies. The SysEx priority window keeps the two
+//     sources from interleaving (a frame at the hand-over is the most that can overlap).
+//   - the master's display state (masterRelay, 2.0.2), whichever source is driving.
+void broadcastMediaSync(MediaSyncPacket& packet) {
+  // v2.2: the origin's frame counter. Free-running and wrapping at 16 bits -- slaves diff
+  // consecutive values to count what they missed (there is no ACK left to count), and
+  // #t-024 will dedup relayed copies on (origin, seq). Minted here, never re-stamped.
+  static uint16_t mediaSyncSeq = 0;
+  packet.seq = ++mediaSyncSeq;
+
+  // 2.0.2: remember what we are relaying so the master's own LCD/LED can show it.
+  // Display only -- deliberately NOT mediaSyncState (see MasterRelayState).
+  masterRelay.index = packet.mediaIndex;
+  masterRelay.positionMs = packet.positionMs;
+  masterRelay.state = packet.state;
+  masterRelay.updatedAt = millis();
+
+  // v2.2: ONE broadcast frame for the whole fleet. The per-slave esp_now_send() loop is
+  // gone, and with it the fan-out burst that silently dropped its last peers -- but the
+  // real change is that delivery no longer consults the receiver table at ALL. "Whoever
+  // hears, plays": slaves already filter on the packet's layer (receiver_mode.cpp), so a
+  // node that moves, arrives or goes needs no peer churn on the master, and a v1.2 slave
+  // reads this frame exactly as before. Airtime drops ~N-fold, which is what makes the LR
+  // PHY affordable. The table stays -- it is still how the master knows who is out there.
+  //
+  // The trade: broadcast has no MAC-layer ACK and no retry, so a lost frame is simply
+  // lost -- covered by the 10 Hz repeat and the slave regenerating MTC from the mesh
+  // clock, i.e. redundancy over time instead of retransmission per packet. Detection is
+  // what actually had to be replaced, and it moved to the slaves: `seq` above, counted
+  // into ReceiverInfo.syncGaps and surfaced per-slave in RUNNING_STATE.
+  if (!rfSimulationEnabled) {
+    relaySend(broadcastAddress, &packet, sizeof(packet));
+  } else {
+    for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
+      if (!delayedPackets[j].active) {
+        delayedPackets[j].sendTime = millis() + random(0, rfSimMaxDelayMs + 1);
+        delayedPackets[j].packet = packet;
+        memcpy(delayedPackets[j].receiverMac, broadcastAddress, 6);
+        delayedPackets[j].active = true;
+        break;
+      }
+    }
+  }
+}

@@ -188,6 +188,13 @@
   #define NOWDE_STOP_ON_LINK_LOST 1
 #endif
 
+// ============= HOST MIDI IN (v2.1, master) =============
+#define HOST_MIDI_SYNC_INTERVAL_MS 100      // MediaSync cadence while the host clock runs
+#define HOST_MIDI_IDLE_INTERVAL_MS 1000     // ... while stopped
+#define HOST_MIDI_MTC_TIMEOUT_MS 250        // no quarter-frame for this long = MTC stopped
+#define HOST_MIDI_SYSEX_PRIORITY_MS 2000    // SysEx MEDIA_SYNC seen within this window wins
+#define MTC_QF_LAG_FRAMES 2                 // an 8-piece QF sequence spans two frames
+
 // ============= HOST LINK =============
 // A host is considered linked while it has sent us anything within this window
 // (HPlayer2 polls QUERY_RUNNING_STATE every 2 s as a keepalive; the Bridge every 1 s).
