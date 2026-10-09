@@ -4,11 +4,15 @@
 #include <cstddef>   // offsetof
 
 // ============= VERSION & CONSTANTS =============
+// 2.0.5: defensive revision after two 19 h radio wedges in the field — WiFi power save off, a radio
+// watchdog (master: every relay send NO_MEM / slave table drained; slave: no master heard) behind an
+// RTC-backed restart backoff, bounded freewheel (NOWDE_FREEWHEEL_MAX_MS) + CC#100=0 repeated while
+// stopped, HELLO link/watchdog trailer. Field facts and rules: src/watchdog.cpp, docs/PROTOCOL.md.
 // 2.0.2: a relaying master now displays what it relays (its LCD/LED used to read idle).
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.4"
+#define NOWDE_VERSION "2.0.5"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -186,6 +190,13 @@
 // baseline to STOP. Boot log prints which one is live.
 #ifndef NOWDE_STOP_ON_LINK_LOST
   #define NOWDE_STOP_ON_LINK_LOST 1
+#endif
+// 2.0.5: a FREEWHEEL slave rides out an RF gap, but not forever. Past this long without a MEDIA_SYNC
+// it stops the host (CC#100=0 + MIDI Stop, the master-stopped edge) and drops to state 0, so the
+// stream's return is a fresh start edge (CC#100=index + full-frame + Start). Bounds the 19 h of blind
+// MTC the field saw (2026-09); 3 min still covers any real foliage fade. Overridable per env.
+#ifndef NOWDE_FREEWHEEL_MAX_MS
+  #define NOWDE_FREEWHEEL_MAX_MS 180000UL
 #endif
 
 // ============= HOST LINK =============
