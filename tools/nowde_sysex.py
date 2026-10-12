@@ -158,9 +158,10 @@ def ota_end():
 # ---- node -> host -----------------------------------------------------------------
 
 def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
-          lr=None, sync_gaps=None, build_id=None):
+          lr=None, link=None, sync_gaps=None, build_id=None):
     """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
-    needs the ones before it: sync_quality (2.0.1), lr (2.0.3), sync_gaps (v2.2, 14-bit),
+    needs the ones before it: sync_quality (2.0.1), lr (2.0.3), link (2.0.5: a
+    (link_lost, ms_since_sync, watchdog_restarts) tuple), sync_gaps (v2.2, 14-bit),
     build_id (v2.1: BUILD_ID_LEN raw bytes, or their hex string)."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
@@ -170,12 +171,16 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
             out += [int(sync_quality) & 0x7F]
             if lr is not None:
                 out += [1 if lr else 0]
-                if sync_gaps is not None:
-                    g = max(0, min(0x3FFF, int(sync_gaps)))
-                    out += [(g >> 7) & 0x7F, g & 0x7F]
-                    if build_id is not None:
-                        b = bytes.fromhex(build_id) if isinstance(build_id, str) else bytes(build_id)
-                        out += encode7(list(b[:BUILD_ID_LEN].ljust(BUILD_ID_LEN, b'\x00')))
+                if link is not None:
+                    lost, since, wd = link
+                    s = max(0, min(0x3FFF, int(since)))
+                    out += [1 if lost else 0, (s >> 7) & 0x7F, s & 0x7F, max(0, min(127, int(wd)))]
+                    if sync_gaps is not None:
+                        g = max(0, min(0x3FFF, int(sync_gaps)))
+                        out += [(g >> 7) & 0x7F, g & 0x7F]
+                        if build_id is not None:
+                            b = bytes.fromhex(build_id) if isinstance(build_id, str) else bytes(build_id)
+                            out += encode7(list(b[:BUILD_ID_LEN].ljust(BUILD_ID_LEN, b'\x00')))
     return out
 
 
@@ -248,10 +253,14 @@ def parse(data):
             info['sync_quality'] = d[18]   # 2.0.1: NOWDE_SYNC_* (0 none, 1 coarse, 2 locked)
         if len(d) >= 20:
             info['lr'] = bool(d[19])       # 2.0.3: the long-range PHY switch as this node runs it
-        if len(d) >= 22:
-            info['sync_gaps'] = (d[20] << 7) | d[21]   # v2.2: MEDIA_SYNC frames this node missed
-        if len(d) >= 32:
-            info['build_id'] = bytes(decode7(d[22:32])[:BUILD_ID_LEN]).hex()   # v2.1: app ELF SHA-256 head
+        if len(d) >= 24:                   # 2.0.5: the receive link as this node sees it
+            info['link_lost'] = bool(d[20])
+            info['ms_since_sync'] = (d[21] << 7) | d[22]   # 0x3FFF = >= 16.4 s, or never
+            info['watchdog_restarts'] = d[23]
+        if len(d) >= 26:
+            info['sync_gaps'] = (d[24] << 7) | d[25]   # v2.2: MEDIA_SYNC frames this node missed
+        if len(d) >= 36:
+            info['build_id'] = bytes(decode7(d[26:36])[:BUILD_ID_LEN]).hex()   # v2.1: app ELF SHA-256 head
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}

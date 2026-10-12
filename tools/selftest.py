@@ -52,10 +52,27 @@ check(nx.parse(nx.set_role('auto'))[1] == {'role': 'auto'}, "SET_ROLE")
 # v2.2 — the trailers the broadcast half adds, and the two runtime switches.
 # Every one of them is APPENDED, so the test that matters is that an older frame still parses
 # into the same fields: that is the whole compat claim, and it is cheap to assert.
-hg = nx.hello('2.2.0', 1000, 1, 0, 3, 2, True, 640)
+hg = nx.hello('2.2.0', 1000, 1, 0, 3, 2, True, (False, 120, 0), 640)
 p = nx.parse(hg)[1]
 check(p['sync_quality'] == 2 and p['lr'] is True and p['sync_gaps'] == 640, f"HELLO v2.2 trailers {p}")
 check('sync_gaps' not in nx.parse(nx.hello('2.0.1', 1, 1, 0, 3, 1))[1], "HELLO 2.0.1 unchanged")
+
+# 2.0.5 — the garden fleet's HELLO link tail holds payload 20..23 (28 bytes on the wire) and v2.2's
+# sync_gaps sits behind it at 24..25 (30 bytes): main moved the field it had never shipped rather
+# than the fleet reflashing six sealed boxes (nowde#t-047).
+h5 = nx.hello('2.0.5', 1000, 1, 0, 3, 2, False, (True, 0x4000, 200))
+check(len(h5) + 2 == 28, f"HELLO 2.0.5 length {len(h5) + 2}")
+check(h5[2 + 20:] == [1, 0x7F, 0x7F, 127], f"HELLO 2.0.5 tail bytes {h5[22:]}")
+p = nx.parse(h5)[1]
+check(p['link_lost'] is True and p['ms_since_sync'] == 0x3FFF and p['watchdog_restarts'] == 127
+      and 'sync_gaps' not in p, f"HELLO 2.0.5 link trailer {p}")
+# Bytes exactly as 2.0.5 firmware emits them (sendHello, garden-2.0.5@0196e2d): linkLost 0,
+# ms since sync 1234 = 0x09 0x52, 3 watchdog restarts. A v2.2-era parser read 20..21 as syncGaps.
+p = nx.parse(nx.hello('2.0.5', 1000, 1, 0, 3, 2, False)[:] + [0, 0x09, 0x52, 3])[1]
+check(p['link_lost'] is False and p['ms_since_sync'] == 1234 and p['watchdog_restarts'] == 3
+      and 'sync_gaps' not in p, f"HELLO 2.0.5 field frame {p}")
+check(len(hg) + 2 == 30 and hg[2 + 24:] == [640 >> 7, 640 & 0x7F], f"HELLO v2.2 sync_gaps at 24..25 {hg[26:]}")
+check(nx.parse(hg)[1]['ms_since_sync'] == 120, f"HELLO v2.2 keeps the 2.0.5 tail {nx.parse(hg)[1]}")
 
 cs22 = nx.config_state(False, 400, 0, 3, 'abc', stop_on_link_lost=False,
                        origin=[0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33], origin_pinned=True)
@@ -87,11 +104,11 @@ check(nx.parse(nx.set_origin())[1] == {'origin': None}, "SET_ORIGIN release")
 # v2.1 — the trust layer: HELLO build identity (c.8) and the RUNNING_STATE `alone` bit (c.7).
 # Both are trailers, so again the claim is two-sided: the new field parses, the old frame doesn't grow one.
 bid = 'ff80a5017f00c3e9'                    # high bits set on purpose: it travels 7-bit encoded
-hb = nx.hello('2.1.0', 1000, 1, 1, 2, 2, False, 0, bid)
-check(len(hb) + 2 == 36, f"HELLO v2.1 length ({len(hb) + 2})")
+hb = nx.hello('2.1.0', 1000, 1, 1, 2, 2, False, (False, 0, 0), 0, bid)
+check(len(hb) + 2 == 40, f"HELLO v2.1 length ({len(hb) + 2})")
 p = nx.parse(hb)[1]
 check(p['build_id'] == bid and p['sync_gaps'] == 0 and p['lr'] is False, f"HELLO build_id {p}")
-check('build_id' not in nx.parse(nx.hello('2.2.0', 1000, 1, 0, 3, 2, True, 640))[1], "HELLO v2.2 unchanged")
+check('build_id' not in nx.parse(nx.hello('2.2.0', 1000, 1, 0, 3, 2, True, (False, 0, 0), 640))[1], "HELLO v2.2 unchanged")
 
 ea = nx.running_state_chunks([], 1000, False, alone=True)[0]
 check(len(ea) + 2 == 15, f"RUNNING_STATE empty chunk + alone is 15 bytes ({len(ea) + 2})")   # MillluBridge floor is 14
