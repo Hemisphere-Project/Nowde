@@ -1,6 +1,7 @@
 # Nowde firmware binaries
 
-Built binaries, one per PlatformIO env, refreshed by `copy_firmware.py` on every build:
+Release binaries, committed in a release commit only. A build writes to `dist/`
+(gitignored) through `copy_firmware.py` and never touches this folder:
 
 | File | Board | Notes |
 |------|-------|-------|

@@ -56,6 +56,12 @@ receivers emit.
 
 - **USB-MIDI port name** `Nowde - XXXXXX` (last three bytes of the MAC). Class
   compliant, no driver. VID `0x303A`, PID `0x8000`.
+- **On Linux the node is an ALSA `USB-Audio` card with no playback device.**
+  USB-MIDI is part of the USB audio class, so `/proc/asound/cards` lists it as
+  `USB-Audio - Nowde - XXXXXX`, with a `midi0` and no PCM. No descriptor the
+  firmware can set changes that. Host tooling that picks a sound card by grepping
+  `USB-Audio` will take the node for one (two hosts did, independently): select
+  audio outputs by the presence of a playback PCM, never by the class name.
 - **CC#100 on channel 1 = media index.** `1..127` selects a clip, `0` stops. The
   index is repeated every second while playing so a host that boots late catches
   up. What an index maps to is the host's business (HPlayer2 plays the file whose
@@ -87,7 +93,9 @@ a host needs:
 | host → node | `OTA_BEGIN / OTA_DATA / OTA_END` | firmware update over USB-MIDI |
 
 Any host that can send SysEx can be a master: the MillluBridge Python GUI, an
-HPlayer2 in master mode, a script built on `mido`.
+HPlayer2 in master mode, a script built on `mido`. A master enumerates exactly
+like a slave: same port name, same VID/PID, and the same ALSA `USB-Audio` card
+with no playback device (see the slave contract above).
 
 ## Hardware
 
@@ -123,8 +131,11 @@ pio run -e esp32-s3-devkitc-1 -t upload      # flash (DevKit: use the UART port)
 pio device monitor -b 115200                 # logs
 ```
 
-Every build copies its binary to `bin/firmware-<env>.bin` (the DevKit env also keeps
-`bin/firmware.bin`, the name the MillluBridge OTA uploader expects).
+Every build copies its binary to `dist/firmware-<env>.bin` (the DevKit env also keeps
+`dist/firmware.bin`, the name the MillluBridge OTA uploader expects). `dist/` is
+gitignored. The committed `bin/` holds the **release** binaries and a build never
+touches it: at a release, copy the shipped envs from `dist/` into `bin/` in the
+release commit, and tag that commit.
 
 AtomS3 / AtomS3 Lite (env `atoms3`, one binary for both):
 
@@ -175,10 +186,11 @@ share a mesh. Tag `v1.2.0` is the last firmware that lived inside MillluBridge.
 ```
 platformio.ini      build envs (one per board)
 src/                firmware (main, sysex, midi, sender_mode, receiver_mode, storage)
-bin/                built binaries, consumed by the OTA uploader
+bin/                release binaries (committed at a release only), consumed by the OTA uploader
+dist/               build output, gitignored
 docs/PROTOCOL.md    SysEx commands, ESP-NOW packets, MIDI contract, byte layouts
 docs/HPLAYER2.md    how HPlayer2 uses a Nowde (slave and master legs)
-copy_firmware.py    post-build hook that fills bin/
+copy_firmware.py    post-build hook that fills dist/
 ```
 
 ## Roadmap

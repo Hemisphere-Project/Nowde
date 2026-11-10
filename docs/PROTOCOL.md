@@ -59,7 +59,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 
 | Cmd | Name | Frame |
 |-----|------|-------|
-| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. Trailers are appended in order and each needs the ones before it — *(v2)* `role(1) board(1)`, *(2.0.1)* `syncQuality(1)`, *(2.0.3)* `lr(1)`, *(v2.2)* `syncGaps(2, 14-bit hi/lo)`. Parsers must accept longer frames; the MillluBridge one does. A slave never sends `RUNNING_STATE`, so `syncGaps` here is how its **own** host reads the delivery signal. |
+| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. Trailers are appended in order and each needs the ones before it; payload offsets counted after the command byte: `[16] role` `[17] board` *(v2)*, `[18] syncQuality` *(2.0.1)*, `[19] lr` *(2.0.3)*, `[20] linkLost(0/1)` `[21..22] msSinceLastMediaSync` (14-bit, `hi7 lo7`, capped at `0x3FFF`; also `0x3FFF` when no MEDIA_SYNC was ever accepted — a master reports that) `[23] watchdogRestarts` (since power-on, capped at 127) *(2.0.5)* — 28 bytes on the wire, `[24..25] syncGaps` (14-bit, `hi7 lo7`) *(v2.2)* — 30 bytes. Parsers must accept longer frames; the MillluBridge one does. A slave never sends `RUNNING_STATE`, so `syncGaps` here is how its **own** host reads the delivery signal. *v2.2 first put `syncGaps` at `[20..21]`; it moved behind the 2.0.5 tail (nowde#t-047) because the garden fleet already sends 2.0.5 and no v2.2 build ever ran in the field.* |
 | `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes. *(v2 appends `role(1) board(1) layerLen(1) layer(ASCII…)`; v2.2 appends `stopOnLinkLost(1) originState(1) originMac(6→7)` after the variable-length layer.)* `originState`: `0` following nobody yet, `1` adopted, `2` pinned by `SET_ORIGIN`. This is the read-back for both runtime switches. |
 | `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(39→45)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)` *(2.0.1 appends `syncQuality(1)`; v2.2 appends `syncGaps(2 BE)`)*. Only *connected* slaves are listed. One record per chunk, so a host that reads the older 36/37-byte record simply stops short of the tail. |
 | `23` | OTA_ACK | reserved, unused in v1.2 |
@@ -125,6 +125,15 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling. *(v2.2: which one is
 choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the build flag
 `NOWDE_STOP_ON_LINK_LOST` is now only the default for a node whose NVS has never been told.)*
 
+*(2.0.5)* Freewheel is **bounded**: after `NOWDE_FREEWHEEL_MAX_MS` (180 s) without a
+packet the slave stops the host exactly like a master-stopped edge (`CC#100 = 0` + Stop),
+stops MTC and returns to state 0 (`[LINK] freewheel > 180 s -> stop`); the stream's return is
+then a fresh start edge (`CC#100 = index`, full-frame, Start). *Link lost* stays flagged until
+a packet clears it. And **while stopped** — once a stop has actually been sent — the slave
+repeats `CC#100 = 0` every second to a linked host, the mirror of the `CC#100 = index` repeat
+while playing, so a host that missed the stop edge (USB gap) learns it within a second. A node
+that never heard its master still says nothing.
+
 ### Controlled flooding (`0x05` `MeshRelayHeader`, v2.2 — #t-024)
 
 Relays `MediaSyncPacket` only (v2.2 scope; see the #t-020 note for why beacons/`ReceiverInfo`
@@ -156,6 +165,7 @@ flooding loop impossible by construction.
 | `CC100_REPEAT_INTERVAL_MS` | 1000 (0 disables) |
 | `CC7_REPEAT_INTERVAL_MS` *(2.0.4)* | 1000 (0 disables) |
 | `LINK_LOST_TIMEOUT_MS` | 10 000 |
+| `NOWDE_FREEWHEEL_MAX_MS` *(2.0.5)* | 180 000 (freewheel bound, overridable per env) |
 | `CLOCK_DESYNC_THRESHOLD_MS` | 200 |
 | `ORIGIN_LOCK_RELEASE_MS` *(v2.2)* | 2000 (silence before an adopted lock may switch master) |
 | `MEDIASYNC_MAX_GAP` *(v2.2)* | 100 (largest `seq` jump still read as loss; 10 s at 10 Hz) |
@@ -205,6 +215,29 @@ within a second while playing). A momentary stall (a `RUNNING_STATE` burst) keep
 | `ESPNOW_Task` | 1 | 10 | 10 ms | beacons, tables, link-lost, MTC generation, `meshClock.loop()` |
 
 NVS namespace `nowde`: `layer` (string). *(v2: `role` u8 — 0 slave, 1 master, 0x7F auto.)*
+
+## Radio watchdog *(2.0.5)*
+
+`src/watchdog.cpp`. Restarts a node whose radio is provably dead — the field saw a master whose
+every `esp_now_send()` returned `ESP_ERR_ESPNOW_NO_MEM` for 19 h while USB-MIDI stayed healthy,
+recovered by a plain `esp_restart()` — and nothing else. WiFi power save is also off since 2.0.5
+(`esp_wifi_set_ps(WIFI_PS_NONE)`, logged at boot).
+
+| Role | Trigger | Log |
+|------|---------|-----|
+| master (sender) | every relay send failed `NO_MEM` for 30 s with the host still feeding it (one successful send ends the streak; since v2.2 the controlled-flooding forwards go through the same `relaySend()` and count too) | `[WATCHDOG] relay NO_MEM for N s -> esp_restart` |
+| master (sender) | the table held ≥ 1 connected slave this boot and has been empty for 120 s | `[WATCHDOG] no slave for N s -> esp_restart` |
+| slave | a master was heard this boot and none for 300 s | `[WATCHDOG] no sender for N s -> esp_restart` |
+
+Bounds: nothing fires in the first 120 s of a boot, never under an OTA, and a restart is only
+allowed once the boot has lived a **backoff** kept in RTC memory (survives `esp_restart()`, not
+a power-on): 5 min, doubled at each watchdog restart of a boot that never had a healthy radio
+for 60 s or that fires within 10 min of the previous one, capped at 60 min, back to 5 min once
+the radio is healthy for 60 s (master: ≥ 1 connected slave; slave: ≥ 1 master heard). Until
+then the trigger is *held* and logs so once a minute. A node that never had a peer this boot
+never fires, so a fleet switched off around it costs it one restart at most. The boot after a
+watchdog restart logs `[WATCHDOG] boot after watchdog restart #n: <reason>`; `bootReason` in
+`HELLO` is `SW` (3), the restart count rides in the `HELLO` trailer.
 
 ## v2 role resolution (boot)
 
