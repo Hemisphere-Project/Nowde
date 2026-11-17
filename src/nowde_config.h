@@ -161,9 +161,9 @@
 // task for. A shorter lead fails silently: the event fires late, and only on the far side of a
 // hop. Mesh-clock error is NOT added on top -- ESPNowMeshClock's forward creep runs on the
 // order of 100s of µs per second, three orders of magnitude under this figure, so it cannot
-// move a millisecond-rounded derivation. Not yet consumed: the 0x04 receive/schedule path is
-// #t-037 / #t-038, both unlanded on `main` -- they read this constant once built. Overridable
-// per env like its inputs above.
+// move a millisecond-rounded derivation. Consumed by the master's fireAt (#t-037) and, on the
+// slave, by the schedule's depth and its clock-trust estimate (#t-038). Overridable per env like
+// its inputs above.
 #ifndef MIDI_EVENT_LEAD_MS
   #define MIDI_EVENT_LEAD_MS (MAX_HOPS * MESH_RELAY_DELAY_MAX_MS)
 #endif
@@ -383,6 +383,18 @@ static_assert(sizeof(MeshRelayHeader) == 10,
 // that rebooted and restarted its counter) is forgotten rather than read as replays.
 #define MIDI_EVENT_DEDUP_WINDOW  128
 #define MIDI_EVENT_DEDUP_IDLE_MS 1000
+// The slave's SCHEDULE (#t-038, docs/PROTOCOL.md "The schedule"): records held until their fire
+// time. Slave-side policy, not a wire field. Derived, not picked: every record the frame cap can
+// carry across one lead plus one batch window -- (90 / 5 + 1) x 14 = 266, 2.1 KB. Past that (a
+// stream denser than the cap's 2 800 events/s, or a trusted-but-skewed clock holding records
+// longer) the earliest record fires early: precision is lost, the event never is.
+// tools/selftest.py checks this formula against the host test's figure.
+#define MIDI_EVENT_SCHED_DEPTH ((MIDI_EVENT_LEAD_MS / MIDI_EVENT_BATCH_MS + 1) * MIDI_EVENT_MAX_NEW)
+static_assert(MIDI_EVENT_SCHED_DEPTH <= 4096, "the schedule is a uint16_t-indexed ring in RAM");
+// The hand-off from onDataRecv (WiFi task) to MIDI_Task, which drains it every 1 ms tick. A full
+// wrapped 0x04 frame is ~2 ms of air at ESP-NOW's 1 Mbps, so two frames' records is headroom;
+// a hand-off found full (MIDI_Task starved) plays the record on arrival rather than lose it.
+#define MIDI_EVENT_HANDOFF_DEPTH (MIDI_EVENT_MAX_RECORDS * 2)
 
 struct MidiEventHeader {
   uint8_t type = ESPNOW_MSG_MIDI_EVENT;

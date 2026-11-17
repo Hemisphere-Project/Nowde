@@ -232,3 +232,47 @@ check(len(full) == nm.MIDI_EVENT_FRAME_MAX and nm.parse_midi_event(full) is not 
       f"14 new + 14 carried is exactly the max frame ({len(full)} B)")
 
 print("nowde_mesh selftest OK")
+
+# ============================================================================================
+# #t-038 — the slave's schedule (docs/PROTOCOL.md "The schedule"). Its logic is a header with no
+# Arduino in it, src/midi_schedule.h, so the host runs the very code the firmware builds:
+# tools/midi_schedule_test.cpp, compiled here when a C++ compiler is on PATH. Without one the
+# rows below still pin the depth, and the run says plainly that the schedule went unchecked.
+# ============================================================================================
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+
+
+def cfg_int(name):
+    m = re.search(rf'^\s*#define {name}\s+(\d+)\b', cfg, re.M)
+    check(m, f"nowde_config.h defines {name}")
+    return int(m.group(1))
+
+
+# The depth is derived from the lead, the batch window and the frame cap — and #t-038's figure,
+# 266, is what that derivation gives for v2.3's frozen constants. A change to any of them moves
+# the depth with it; a change to the formula is what this row is for.
+m = re.search(r'^#define MIDI_EVENT_SCHED_DEPTH\s+(.+)$', cfg, re.M)
+check(m and m.group(1).replace(' ', '')
+      == '((MIDI_EVENT_LEAD_MS/MIDI_EVENT_BATCH_MS+1)*MIDI_EVENT_MAX_NEW)',
+      "MIDI_EVENT_SCHED_DEPTH is (lead / batch + 1) x max new")
+lead = cfg_int('MAX_HOPS') * cfg_int('MESH_RELAY_DELAY_MAX_MS')
+check(lead == 90, f"the lead the schedule is sized on is 90 ms ({lead})")
+depth = (lead // cfg_int('MIDI_EVENT_BATCH_MS') + 1) * nm.MIDI_EVENT_MAX_NEW
+check(depth == 266, f"schedule depth is 266 records ({depth})")
+
+here = os.path.dirname(os.path.abspath(__file__))
+cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
+if not cxx:
+    print("midi_schedule host test SKIPPED: no host C++ compiler on PATH")
+else:
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, 'midi_schedule_test')
+        build = subprocess.run([cxx, '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
+                                os.path.join(here, 'midi_schedule_test.cpp')],
+                               capture_output=True, text=True)
+        check(build.returncode == 0, f"midi_schedule_test builds:\n{build.stderr}")
+        run = subprocess.run([exe], capture_output=True, text=True)
+        check(run.returncode == 0, f"midi_schedule_test:\n{run.stdout}{run.stderr}")
+        print(run.stdout.strip())

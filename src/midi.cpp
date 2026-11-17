@@ -30,6 +30,7 @@ Smpte toSmpte(uint32_t positionMs) {
 
 void midiInit() {
   MIDI.begin();
+  midiEventInit();   // v2.3 0x04 (#t-038): the slave's hand-off queue, before ESP-NOW is up
 }
 
 void midiSendCC(uint8_t cc, uint8_t value) {
@@ -129,7 +130,8 @@ bool midiReadPacket(midiEventPacket_t* packet) {
 void midiProcess() {
   midiEventPacket_t packet;
 
-  usbOutPump();   // MIDI task: everything queued for the host goes out here
+  midiEventFire();   // v2.3 0x04 (#t-038): scheduled records whose mesh time has come
+  usbOutPump();      // MIDI task: everything queued for the host goes out here
 
   while (midiReadPacket(&packet)) {
     if (!hostLinked()) {

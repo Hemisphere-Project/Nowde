@@ -1,7 +1,11 @@
 #include "midi_event.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+
 #include "esp_now_handlers.h"   // relaySend()
 #include "mesh_relay.h"         // midiEventFrameComplete()
+#include "midi_schedule.h"      // EventSchedule, frameClockTrusted(), recordFiresAt()
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "usb_out.h"
@@ -226,9 +230,15 @@ void midiEventTick() {
   snapshotTick(now);
 }
 
-// ============================== the SLAVE leg (slice 3) ==============================
-// docs/PROTOCOL.md "Slave-side handling of a 0x04 frame". Runs in the WiFi task (onDataRecv),
-// which owns everything below; the host is reached only through usbOutMidi()'s queue.
+// ============================== the SLAVE leg (slice 3, #t-038) ==============================
+// docs/PROTOCOL.md "Slave-side handling of a 0x04 frame" and "The schedule". Two contexts, one
+// queue between them:
+//   - the WiFi task (onDataRecv -> midiEventReceive) validates, filters, judges the clock, drops
+//     what is stale, dedups, and hands each record over with its fire time;
+//   - MIDI_Task (midiProcess -> midiEventFire, every 1 ms) owns the schedule, fires what is due,
+//     and reaches the host through usbOutMidi() like everything else.
+// Records are SCHEDULED at fireAt + offset, never played on arrival -- that is what makes a chord
+// land together on every node and across a relay hop. The 10 ms ESPNOW_Task would cost +-10 ms.
 
 namespace {
 
@@ -296,7 +306,41 @@ void playRecord(uint8_t status, uint8_t data1, uint8_t data2) {
   usbOutMidi(packet);
 }
 
+void playScheduled(const ScheduledEvent& e) {
+  playRecord(e.status, e.data1, e.data2);
+}
+
+// WiFi task -> MIDI_Task. One record, its fire time already decided by the WiFi task.
+struct Handoff {
+  uint32_t firesAt;   // mesh ms; ignored for a SNAPSHOT record
+  uint8_t status, data1, data2;
+  uint8_t snapshot;   // 1 = current state, at once -- unless the schedule holds that controller
+};
+QueueHandle_t handoff = nullptr;
+
+EventSchedule<MIDI_EVENT_SCHED_DEPTH> schedule;   // MIDI_Task only: no lock
+
+// Counters for the once-a-second log lines; written by one task each, read for a log only.
+uint32_t coarseFrames = 0;    // WiFi task: frames played on arrival, the clock not trusted
+uint32_t handoffMissed = 0;   // WiFi task: hand-off full, the record played on arrival
+uint32_t earlyFires = 0;      // MIDI_Task: schedule full, the earliest record fired early
+
+void handOver(const Handoff& h) {
+  if (handoff && xQueueSend(handoff, &h, 0) == pdTRUE) {
+    return;
+  }
+  // MIDI_Task has not drained two frames' worth: play it now rather than lose it.
+  handoffMissed++;
+  playRecord(h.status, h.data1, h.data2);
+}
+
 }  // namespace
+
+void midiEventInit() {
+  if (!handoff) {
+    handoff = xQueueCreate(MIDI_EVENT_HANDOFF_DEPTH, sizeof(Handoff));
+  }
+}
 
 void midiEventReceive(const uint8_t* origin, const uint8_t* frame, int len) {
   if (!midiEventFrameComplete(frame, len)) {
@@ -320,6 +364,25 @@ void midiEventReceive(const uint8_t* origin, const uint8_t* frame, int len) {
   const uint8_t* rec = frame + header.hdrLen;                       // never our own sizeof
   const uint32_t now = meshMillisStable();
 
+  // The clock check, once per frame (docs/PROTOCOL.md "The schedule"): the MediaSync rule, for
+  // the same reason. Disagreeing clocks cost precision -- the frame plays on arrival, as v2.3
+  // did before it scheduled -- and never the events: no record is judged stale on a clock that
+  // is itself the thing in doubt.
+  const bool statesLead = !snapshot && header.newCount > 0;
+  const bool clockTrusted = frameClockTrusted(now, header.fireAt, statesLead, MIDI_EVENT_LEAD_MS,
+                                              CLOCK_DESYNC_THRESHOLD_MS);
+  if (!clockTrusted && !snapshot) {
+    coarseFrames++;
+    static unsigned long lastCoarseLog = 0;
+    if (millis() - lastCoarseLog > 1000) {   // at most once per second
+      DEBUG_SERIAL.printf("[MIDI EVENT] COARSE - mesh clock disagrees with the master's "
+                          "(threshold=%lu ms); playing on arrival (%lu frames so far)\r\n",
+                          static_cast<unsigned long>(CLOCK_DESYNC_THRESHOLD_MS),
+                          static_cast<unsigned long>(coarseFrames));
+      lastCoarseLog = millis();
+    }
+  }
+
   for (int i = 0; i < records; i++, rec += header.recLen) {
     uint8_t status = rec[0];
     if (status < 0x80 || status > 0xEF) {
@@ -327,9 +390,10 @@ void midiEventReceive(const uint8_t* origin, const uint8_t* frame, int len) {
     }
     if (snapshot) {
       // Current state, at once: no schedule, no evSeq dedup. Controllers only -- a Note On
-      // replayed from a snapshot would retrigger.
+      // replayed from a snapshot would retrigger. MIDI_Task plays it, unless a scheduled record
+      // for the same controller is still waiting: that one is newer than the snapshot's view.
       if ((status & 0xF0) == 0xB0) {
-        playRecord(status, rec[1], rec[2]);
+        handOver({0, status, rec[1], rec[2], 1});
       }
       continue;
     }
@@ -337,15 +401,50 @@ void midiEventReceive(const uint8_t* origin, const uint8_t* frame, int len) {
     int16_t offset;
     memcpy(&evSeq, rec + 3, sizeof(evSeq));
     memcpy(&offset, rec + 5, sizeof(offset));
-    uint32_t firesAt = header.fireAt + static_cast<int32_t>(offset);
+    uint32_t firesAt = 0;
     // 4. Stale first, so a copy too old to play never touches the dedup window.
-    if (static_cast<int32_t>(now - firesAt) > MIDI_EVENT_MAX_STALE_MS) {
+    if (!recordFiresAt(now, header.fireAt, offset, clockTrusted, MIDI_EVENT_MAX_STALE_MS,
+                       &firesAt)) {
       continue;
     }
     // 3. Fired once, whichever frame or path brought it.
     if (!evSeqFresh(origin, evSeq)) {
       continue;
     }
-    playRecord(status, rec[1], rec[2]);   // on arrival; #t-038 moves this onto the 1 ms tick
+    handOver({firesAt, status, rec[1], rec[2], 0});   // scheduled: MIDI_Task fires it on time
+  }
+}
+
+void midiEventFire() {
+  if (!handoff) {
+    return;
+  }
+  Handoff h;
+  while (xQueueReceive(handoff, &h, 0) == pdTRUE) {
+    if (h.snapshot) {
+      if (!schedule.holds(h.status, h.data1)) {
+        playRecord(h.status, h.data1, h.data2);
+      }
+      continue;
+    }
+    if (!schedule.add({h.firesAt, h.status, h.data1, h.data2}, playScheduled)) {
+      earlyFires++;
+    }
+  }
+  if (schedule.size() > 0) {
+    schedule.fireDue(meshMillisStable(), playScheduled);
+  }
+
+  static uint32_t loggedEarly = 0, loggedMissed = 0;
+  static unsigned long lastLog = 0;
+  if ((earlyFires != loggedEarly || handoffMissed != loggedMissed) && millis() - lastLog > 1000) {
+    DEBUG_SERIAL.printf("[MIDI EVENT] schedule full (%u): %lu fired early; hand-off full: %lu "
+                        "played on arrival\r\n",
+                        static_cast<unsigned>(schedule.capacity()),
+                        static_cast<unsigned long>(earlyFires),
+                        static_cast<unsigned long>(handoffMissed));
+    loggedEarly = earlyFires;
+    loggedMissed = handoffMissed;
+    lastLog = millis();
   }
 }
