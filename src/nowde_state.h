@@ -61,6 +61,25 @@ struct DelayedMediaSyncPacket {
 #define MAX_DELAYED_PACKETS 20
 extern DelayedMediaSyncPacket delayedPackets[MAX_DELAYED_PACKETS];
 
+// v2.2 controlled flooding (#t-024): last (origin, seq) already forwarded, scheduled or
+// suppressed, per master this node has ever relayed for (see RelayOriginEntry, nowde_config.h).
+extern RelayOriginEntry relayOrigins[MAX_RELAY_ORIGINS];
+
+// One in-flight forward, mid its random 5-30 ms delay, waiting either to fire or to be
+// suppressed if another node's copy of the same (origin, seq) is heard first (topology note
+// §(2), "if you hear someone else forward it first, drop yours"). The payload is the inner
+// packet, copied byte-verbatim -- never re-stamped, see the #t-020 note.
+struct PendingRelay {
+  bool active = false;
+  unsigned long sendTime = 0;
+  uint8_t origin[6] = {0};
+  uint16_t seq = 0;
+  uint8_t hop = 0;                                  // hop to STAMP on the outgoing envelope
+  uint8_t payload[sizeof(MediaSyncPacket)] = {0};
+  uint8_t payloadLen = 0;
+};
+extern PendingRelay pendingRelays[MAX_PENDING_RELAYS];
+
 bool macEqual(const uint8_t* mac1, const uint8_t* mac2);
 int countActiveSenders();
 int countActiveReceivers();

@@ -32,5 +32,11 @@ extern volatile uint32_t espnowTxOk;
 extern volatile uint32_t espnowTxFail;
 extern volatile uint32_t espnowRelayDropped;
 
+// esp_now_send() with the ESP_ERR_ESPNOW_NO_MEM retry (queue full, not peer gone) and the
+// enqueue-failure telemetry, shared by the MEDIA_SYNC broadcast (sysex.cpp) and the v2.2
+// controlled-flooding forward (mesh_relay.cpp, #t-024) -- both are "broadcast a struct",
+// and a divergent second copy of the retry logic is how the two quietly stop agreeing.
+esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len);
+
 void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status);
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len);

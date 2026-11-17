@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "mesh_relay.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "receiver_mode.h"
@@ -87,11 +88,40 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       // the room would be followed by the first -- origin-locking onto it and emitting its
       // position as MTC to its own host. A node that drives the mesh does not follow it.
       if (receiverModeEnabled && !senderModeEnabled) {
-        // Direct path: the sender IS the origin. #t-024's ESPNOW_MSG_MESH_RELAY case will pass
-        // the envelope's origin instead — src_addr there is the relayer, not the master.
+        // Direct path: the sender IS the origin. The ESPNOW_MSG_MESH_RELAY case below passes
+        // the envelope's origin instead -- src_addr there is the relayer, not the master.
         processMediaSyncPacket(info->src_addr, data, len);
       }
+      // v2.2 controlled flooding (#t-024): ANY node, regardless of role, may extend this
+      // packet's reach for a moving/out-of-range slave (topology note §(2)(3)) -- relaying is
+      // a mesh-layer service, orthogonal to who consumes the packet above. Dedup needs the
+      // origin's own `seq`, only present once the frame is the full v2.2 size; a shorter frame
+      // from an older master is still consumed above, it simply gets no relay coverage.
+      if (len >= static_cast<int>(sizeof(MediaSyncPacket))) {
+        const MediaSyncPacket* directPacket = reinterpret_cast<const MediaSyncPacket*>(data);
+        handleFloodCandidate(info->src_addr, directPacket->seq, 0, data, len, false);
+      }
       break;
+
+    case ESPNOW_MSG_MESH_RELAY: {
+      // v2.2 controlled flooding (#t-024). New type, never a trailer on 0x03 -- see the
+      // #t-020 note "Why a trailer on 0x03 is the wrong spelling": a v1.2 slave ignores an
+      // unknown type outright, where a trailer it would have ACTED on, origin-lock and all.
+      if (len < static_cast<int>(sizeof(MeshRelayHeader) + MEDIA_SYNC_MIN_LEN)) {
+        break;  // too short to be a real relay frame -- malformed or truncated, drop silently
+      }
+      const MeshRelayHeader* header = reinterpret_cast<const MeshRelayHeader*>(data);
+      const uint8_t* inner = data + sizeof(MeshRelayHeader);
+      int innerLen = len - static_cast<int>(sizeof(MeshRelayHeader));
+
+      if (receiverModeEnabled && !senderModeEnabled) {
+        // Relayed path: the envelope's origin, never info->src_addr (that is the relayer's
+        // MAC, not the master's) -- see OriginLock's comment, nowde_config.h.
+        processMediaSyncPacket(header->origin, inner, innerLen);
+      }
+      handleFloodCandidate(header->origin, header->seq, header->hop, inner, innerLen, true);
+      break;
+    }
 
     default:
       break;

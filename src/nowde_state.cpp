@@ -42,6 +42,10 @@ unsigned long rfSimMaxDelayMs = 400; // Default max delay 400ms
 
 DelayedMediaSyncPacket delayedPackets[MAX_DELAYED_PACKETS] = {};
 
+// v2.2 controlled flooding (#t-024) -- see mesh_relay.h/.cpp for the logic that uses these.
+RelayOriginEntry relayOrigins[MAX_RELAY_ORIGINS] = {};
+PendingRelay pendingRelays[MAX_PENDING_RELAYS] = {};
+
 bool macEqual(const uint8_t* mac1, const uint8_t* mac2) {
   for (int i = 0; i < 6; i++) {
     if (mac1[i] != mac2[i]) {

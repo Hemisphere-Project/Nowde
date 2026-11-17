@@ -4,11 +4,15 @@
 #include <cstddef>   // offsetof
 
 // ============= VERSION & CONSTANTS =============
+// 2.0.5: defensive revision after two 19 h radio wedges in the field — WiFi power save off, a radio
+// watchdog (master: every relay send NO_MEM / slave table drained; slave: no master heard) behind an
+// RTC-backed restart backoff, bounded freewheel (NOWDE_FREEWHEEL_MAX_MS) + CC#100=0 repeated while
+// stopped, HELLO link/watchdog trailer. Field facts and rules: src/watchdog.cpp, docs/PROTOCOL.md.
 // 2.0.2: a relaying master now displays what it relays (its LCD/LED used to read idle).
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.4"
+#define NOWDE_VERSION "2.0.5"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -115,6 +119,54 @@
   #define MEDIASYNC_MAX_GAP 100
 #endif
 
+// v2.2 CONTROLLED FLOODING (#t-024, topology note §(2)(3)): dedup on (origin, seq) + a hop
+// limit make relaying loop-proof by construction; the randomized delay + overhearing
+// suppression below (mesh_relay.cpp) keep the airtime the topology note actually budgeted for
+// -- ~6 % at 6 nodes / 10 Hz, computed at the 1 Mbps default. #t-009 closed 23/09 with LR
+// decided OFF (15/09 MBA, 90/90 sealed), so that budget stands: nothing here recomputes for
+// LR's rate, per #t-009's own dossier ("MAX_HOPS and the forward-delay window come from the
+// topology note, not a distance number").
+//
+// MAX_HOPS is a RANGE in the design ("hop limit MAX_HOPS 2-3", topology note §(2)) -- freezing
+// it here to the upper bound: the fleet is small (5-6 nodes) and the whole feature exists for
+// a moving/out-of-range slave (§(3)), so the extra reach is worth the extra worst-case latency
+// (MAX_HOPS x 30 ms = 90 ms vs 60 ms at 2) -- well inside what the design already tolerates,
+// since the relay delay is self-compensating (the inner packet's own `meshTimestamp`, never
+// re-stamped -- see the #t-020 note "Why the inner packet is copied verbatim"). #t-039 derives
+// its fixed lead off THIS number. Overridable per env like every other v2.2 default below.
+#ifndef MAX_HOPS
+  #define MAX_HOPS 3
+#endif
+// 5-30 ms, unchanged from the topology note -- not a distance number, nothing to recompute.
+#ifndef MESH_RELAY_DELAY_MIN_MS
+  #define MESH_RELAY_DELAY_MIN_MS 5
+#endif
+#ifndef MESH_RELAY_DELAY_MAX_MS
+  #define MESH_RELAY_DELAY_MAX_MS 30
+#endif
+// One relay-dedup slot per master this node could ever see relaying for -- MAX_SENDERS is the
+// existing bound on how many senders a node tracks at all, so this can never be the tighter one.
+#define MAX_RELAY_ORIGINS MAX_SENDERS
+// Concurrent in-flight forwards, mid their randomized delay. At ~10 Hz traffic and a <=30 ms
+// window this is generous headroom, not a measured ceiling.
+#define MAX_PENDING_RELAYS 8
+
+// v2.3 FIXED LEAD (#t-039, topology note §(4): "fire-at mesh timestamps with a fixed lead"):
+// a sender picks fireAt = now + MIDI_EVENT_LEAD_MS (mesh time) so a MIDI_EVENT frame (0x04,
+// reserved below) has cleared its worst-case relay path -- MAX_HOPS hops, each up to
+// MESH_RELAY_DELAY_MAX_MS of randomized forward delay -- before that time is due. Derived, not
+// chosen, off the two frozen constants above: MAX_HOPS(3) x MESH_RELAY_DELAY_MAX_MS(30 ms) =
+// 90 ms -- the exact figure #t-024's own MAX_HOPS comment already worked out and named this
+// task for. A shorter lead fails silently: the event fires late, and only on the far side of a
+// hop. Mesh-clock error is NOT added on top -- ESPNowMeshClock's forward creep runs on the
+// order of 100s of µs per second, three orders of magnitude under this figure, so it cannot
+// move a millisecond-rounded derivation. Not yet consumed: the 0x04 receive/schedule path is
+// #t-037 / #t-038, both unlanded on `main` -- they read this constant once built. Overridable
+// per env like its inputs above.
+#ifndef MIDI_EVENT_LEAD_MS
+  #define MIDI_EVENT_LEAD_MS (MAX_HOPS * MESH_RELAY_DELAY_MAX_MS)
+#endif
+
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
@@ -138,6 +190,13 @@
 // baseline to STOP. Boot log prints which one is live.
 #ifndef NOWDE_STOP_ON_LINK_LOST
   #define NOWDE_STOP_ON_LINK_LOST 1
+#endif
+// 2.0.5: a FREEWHEEL slave rides out an RF gap, but not forever. Past this long without a MEDIA_SYNC
+// it stops the host (CC#100=0 + MIDI Stop, the master-stopped edge) and drops to state 0, so the
+// stream's return is a fresh start edge (CC#100=index + full-frame + Start). Bounds the 19 h of blind
+// MTC the field saw (2026-09); 3 min still covers any real foliage fade. Overridable per env.
+#ifndef NOWDE_FREEWHEEL_MAX_MS
+  #define NOWDE_FREEWHEEL_MAX_MS 180000UL
 #endif
 
 // ============= HOST LINK =============
@@ -203,11 +262,12 @@
                                          // Locate record 0 at hdrLen and stride by recLen -- never
                                          // by sizeof: that is what keeps the charter's append-only
                                          // rule workable on a frame whose tail is an array.
-#define ESPNOW_MSG_MESH_RELAY 0x05       // v2.2: reserved for #t-024 — { origin[6], seq u16, hop u8 } + the
-                                         // original packet verbatim. A NEW TYPE, never a trailer on 0x03: a
-                                         // v1.2 slave ignores an unknown type but ACTS on a longer 0x03, and
-                                         // it cannot origin-lock, so a trailer relay would hand it foreign
-                                         // masters from the whole flooding radius. See the #t-020 note.
+#define ESPNOW_MSG_MESH_RELAY 0x05       // v2.2 (#t-024): MeshRelayHeader { origin[6], seq u16, hop u8 } +
+                                         // the original packet verbatim. A NEW TYPE, never a trailer on
+                                         // 0x03: a v1.2 slave ignores an unknown type but ACTS on a longer
+                                         // 0x03, and it cannot origin-lock, so a trailer relay would hand
+                                         // it foreign masters from the whole flooding radius. See the
+                                         // #t-020 note. Handled in esp_now_handlers.cpp + mesh_relay.cpp.
 
 // ============= DATA STRUCTURES =============
 struct SenderBeacon {
@@ -277,6 +337,31 @@ struct MediaSyncPacket {
 
 constexpr uint8_t MEDIASYNC_FLAG_VOLUME = 0x01;
 constexpr uint8_t MEDIASYNC_FLAG_MUTE   = 0x02;
+
+// v2.2 controlled flooding (#t-024). A NEW type, never a trailer on 0x03 -- see the #t-020
+// note "Why a trailer on 0x03 is the wrong spelling". `origin` is the MAC that MINTED the
+// wrapped packet (the master, never the relayer); `seq` is copied from the inner packet's own
+// MediaSyncPacket.seq, never re-minted, so dedup and re-relay suppression share one key with
+// the receiver's own gap counter. `hop` is hops ALREADY taken (1 = one relay so far); a node
+// about to add another checks `hop + 1 <= MAX_HOPS` before it schedules one. On the wire:
+// this header (10 B) followed by the original packet, copied byte-verbatim.
+struct MeshRelayHeader {
+  uint8_t type = ESPNOW_MSG_MESH_RELAY;
+  uint8_t origin[6];
+  uint16_t seq;
+  uint8_t hop;
+} __attribute__((packed));
+static_assert(sizeof(MeshRelayHeader) == 10,
+              "MeshRelayHeader must stay 10 B on the wire (docs/PROTOCOL.md, the #t-020 note)");
+
+// v2.2 controlled flooding (#t-024): last (origin, seq) this node has already forwarded,
+// scheduled, or suppressed -- one entry per master it has ever relayed for. Same shape as
+// SenderEntry on purpose; a relay-dedup table is the same kind of "who have we heard" record.
+struct RelayOriginEntry {
+  uint8_t mac[6] = {0};
+  uint16_t lastSeq = 0;
+  bool valid = false;
+};
 
 struct SenderEntry {
   uint8_t mac[6];
