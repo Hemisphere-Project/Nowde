@@ -4,11 +4,15 @@
 #include <cstddef>   // offsetof
 
 // ============= VERSION & CONSTANTS =============
+// 2.0.5: defensive revision after two 19 h radio wedges in the field — WiFi power save off, a radio
+// watchdog (master: every relay send NO_MEM / slave table drained; slave: no master heard) behind an
+// RTC-backed restart backoff, bounded freewheel (NOWDE_FREEWHEEL_MAX_MS) + CC#100=0 repeated while
+// stopped, HELLO link/watchdog trailer. Field facts and rules: src/watchdog.cpp, docs/PROTOCOL.md.
 // 2.0.2: a relaying master now displays what it relays (its LCD/LED used to read idle).
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.4"
+#define NOWDE_VERSION "2.0.5"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 #define MAX_SENDERS 10
@@ -147,6 +151,22 @@
 // window this is generous headroom, not a measured ceiling.
 #define MAX_PENDING_RELAYS 8
 
+// v2.3 FIXED LEAD (#t-039, topology note §(4): "fire-at mesh timestamps with a fixed lead"):
+// a sender picks fireAt = now + MIDI_EVENT_LEAD_MS (mesh time) so a MIDI_EVENT frame (0x04,
+// layout frozen below) has cleared its worst-case relay path -- MAX_HOPS hops, each up to
+// MESH_RELAY_DELAY_MAX_MS of randomized forward delay -- before that time is due. Derived, not
+// chosen, off the two frozen constants above: MAX_HOPS(3) x MESH_RELAY_DELAY_MAX_MS(30 ms) =
+// 90 ms -- the exact figure #t-024's own MAX_HOPS comment already worked out and named this
+// task for. A shorter lead fails silently: the event fires late, and only on the far side of a
+// hop. Mesh-clock error is NOT added on top -- ESPNowMeshClock's forward creep runs on the
+// order of 100s of µs per second, three orders of magnitude under this figure, so it cannot
+// move a millisecond-rounded derivation. Not yet consumed: the 0x04 receive/schedule path is
+// #t-037 / #t-038, both unlanded on `main` -- they read this constant once built. Overridable
+// per env like its inputs above.
+#ifndef MIDI_EVENT_LEAD_MS
+  #define MIDI_EVENT_LEAD_MS (MAX_HOPS * MESH_RELAY_DELAY_MAX_MS)
+#endif
+
 // ============= MEDIA SYNC CONFIGURATION =============
 // Interval for repeating CC#100 while playing (0 = disable auto-repeat)
 #define CC100_REPEAT_INTERVAL_MS 1000
@@ -170,6 +190,13 @@
 // baseline to STOP. Boot log prints which one is live.
 #ifndef NOWDE_STOP_ON_LINK_LOST
   #define NOWDE_STOP_ON_LINK_LOST 1
+#endif
+// 2.0.5: a FREEWHEEL slave rides out an RF gap, but not forever. Past this long without a MEDIA_SYNC
+// it stops the host (CC#100=0 + MIDI Stop, the master-stopped edge) and drops to state 0, so the
+// stream's return is a fresh start edge (CC#100=index + full-frame + Start). Bounds the 19 h of blind
+// MTC the field saw (2026-09); 3 min still covers any real foliage fade. Overridable per env.
+#ifndef NOWDE_FREEWHEEL_MAX_MS
+  #define NOWDE_FREEWHEEL_MAX_MS 180000UL
 #endif
 
 // ============= HOST LINK =============
@@ -228,7 +255,13 @@
 #define ESPNOW_MSG_SENDER_BEACON 0x01
 #define ESPNOW_MSG_RECEIVER_INFO 0x02
 #define ESPNOW_MSG_MEDIA_SYNC 0x03
-#define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.1: reserved (Note/CC relay scheduled on mesh time)
+#define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.3: byte layout FROZEN in docs/PROTOCOL.md "The v2.3
+                                         // event frame", not yet implemented (#t-037 builds it).
+                                         // 30-byte header + N x 7-byte records, <= 14 new + <= 14
+                                         // carried, <= 226 B so it survives the 0x05 envelope.
+                                         // Locate record 0 at hdrLen and stride by recLen -- never
+                                         // by sizeof: that is what keeps the charter's append-only
+                                         // rule workable on a frame whose tail is an array.
 #define ESPNOW_MSG_MESH_RELAY 0x05       // v2.2 (#t-024): MeshRelayHeader { origin[6], seq u16, hop u8 } +
                                          // the original packet verbatim. A NEW TYPE, never a trailer on
                                          // 0x03: a v1.2 slave ignores an unknown type but ACTS on a longer

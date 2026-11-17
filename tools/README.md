@@ -20,5 +20,10 @@ uv run tools/nowde-sim.py master             # fake master node: HPlayer2 takes 
   `biennale.py` / `25-annatv.py` against a node that does not exist yet.
 - `nowde_sysex.py` — the wire helpers both use; byte-exact with `src/sysex.cpp` and the
   MillluBridge Bridge (`docs/PROTOCOL.md`).
+- `nowde_mesh.py` — the same for the *other* wire: the packed little-endian ESP-NOW structs
+  nodes exchange over the air, byte-exact with `src/nowde_config.h`. Currently `0x04
+  MIDI_EVENT` only, which is here before any firmware is because the charter freezes that
+  frame the moment a fielded node parses it — so `selftest.py` checks the layout and the
+  250-byte arithmetic instead of a comment claiming they add up.
 
 Without uv: `pip install mido python-rtmidi` and run the scripts with `python3`.

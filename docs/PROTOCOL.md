@@ -59,7 +59,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 
 | Cmd | Name | Frame |
 |-----|------|-------|
-| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. Trailers are appended in order and each needs the ones before it — *(v2)* `role(1) board(1)`, *(2.0.1)* `syncQuality(1)`, *(2.0.3)* `lr(1)`, *(v2.2)* `syncGaps(2, 14-bit hi/lo)`. Parsers must accept longer frames; the MillluBridge one does. A slave never sends `RUNNING_STATE`, so `syncGaps` here is how its **own** host reads the delivery signal. |
+| `20` | HELLO | `F0 7D 20 version(8→10) uptimeMs(4→5) bootReason(1) F7` — 20 bytes. Sent on boot (after USB enumeration) and on every `QUERY_CONFIG`. `version` is the NUL-padded `NOWDE_VERSION` string; `bootReason` is `esp_reset_reason() & 0x7F`. Trailers are appended in order and each needs the ones before it; payload offsets counted after the command byte: `[16] role` `[17] board` *(v2)*, `[18] syncQuality` *(2.0.1)*, `[19] lr` *(2.0.3)*, `[20] linkLost(0/1)` `[21..22] msSinceLastMediaSync` (14-bit, `hi7 lo7`, capped at `0x3FFF`; also `0x3FFF` when no MEDIA_SYNC was ever accepted — a master reports that) `[23] watchdogRestarts` (since power-on, capped at 127) *(2.0.5)* — 28 bytes on the wire, `[24..25] syncGaps` (14-bit, `hi7 lo7`) *(v2.2)* — 30 bytes. Parsers must accept longer frames; the MillluBridge one does. A slave never sends `RUNNING_STATE`, so `syncGaps` here is how its **own** host reads the delivery signal. *v2.2 first put `syncGaps` at `[20..21]`; it moved behind the 2.0.5 tail (nowde#t-047) because the garden fleet already sends 2.0.5 and no v2.2 build ever ran in the field.* |
 | `21` | CONFIG_STATE | `F0 7D 21 rfSim(1) delayHi(1) delayLo(1) F7` — 7 bytes. *(v2 appends `role(1) board(1) layerLen(1) layer(ASCII…)`; v2.2 appends `stopOnLinkLost(1) originState(1) originMac(6→7)` after the variable-length layer.)* `originState`: `0` following nobody yet, `1` adopted, `2` pinned by `SET_ORIGIN`. This is the read-back for both runtime switches. |
 | `22` | RUNNING_STATE | per chunk: `F0 7D 22 uptimeMs(4→5) meshSynced(1) totalSlaves(1) chunkIndex(1) chunkCount(1) slavesInChunk(1) [slave(39→45)] F7`. One slave per chunk. Slave record, raw: `mac(6) layer(16) version(8) lastSeenMs(4 BE) active(1) mediaIndex(1)` *(2.0.1 appends `syncQuality(1)`; v2.2 appends `syncGaps(2 BE)`)*. Only *connected* slaves are listed. One record per chunk, so a host that reads the older 36/37-byte record simply stops short of the tail. |
 | `23` | OTA_ACK | reserved, unused in v1.2 |
@@ -89,7 +89,7 @@ native little-endian.
 | `0x02` | `ReceiverInfo { type, layer[16], version[8], mediaIndex }` *(2.0.1 appends `syncQuality u8`; v2.2 appends `syncGaps u16`)* | slave → each known master, unicast | 1 s + 0–200 ms jitter. The master marks a slave *missing* after 5 s and drops it after 10 s. |
 | `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(2.0.4 appends `volume u8`, `flags u8` → 29 B; v2.2 appends `seq u16` → 31 B, **in that order**: 2.0.4 shipped first, so its offsets are fixed and `seq` goes after)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
 | `0xF0…` | SysEx frame, mesh form of `CHANGE_RECEIVER_LAYER`: `F0 7D 11 layer(raw ASCII, unpadded) F7` | master → one slave | on demand. The slave stores the layer in NVS and re-announces itself. |
-| `0x04` | `MidiEvent` *(v2, reserved)* | master → slaves | Note / CC / PC relay scheduled on mesh time |
+| `0x04` | `MidiEventFrame` *(v2.3 — byte layout frozen below, **not yet implemented**)* | master → broadcast | Note / CC / PC relay scheduled on mesh time. Batched, see [the event frame](#the-v23-event-frame-0x04). |
 | `0x05` | `MeshRelayHeader { origin[6], seq u16, hop u8 }` (10 B) + the original packet verbatim *(v2.2 — #t-024)* | any node → broadcast | controlled flooding for out-of-range / moving slaves. A **new type**, not a trailer on `0x03`: a v1.2 slave ignores an unknown type but *acts* on a longer `0x03`, and it cannot origin-lock. |
 
 ### Slave-side handling of `MediaSyncPacket`
@@ -125,6 +125,15 @@ send `CC#100 = 0` (`stopOnLinkLost`), or keep freewheeling. *(v2.2: which one is
 choice, set live with `SET_LOSS_POLICY` and read back in `CONFIG_STATE`; the build flag
 `NOWDE_STOP_ON_LINK_LOST` is now only the default for a node whose NVS has never been told.)*
 
+*(2.0.5)* Freewheel is **bounded**: after `NOWDE_FREEWHEEL_MAX_MS` (180 s) without a
+packet the slave stops the host exactly like a master-stopped edge (`CC#100 = 0` + Stop),
+stops MTC and returns to state 0 (`[LINK] freewheel > 180 s -> stop`); the stream's return is
+then a fresh start edge (`CC#100 = index`, full-frame, Start). *Link lost* stays flagged until
+a packet clears it. And **while stopped** — once a stop has actually been sent — the slave
+repeats `CC#100 = 0` every second to a linked host, the mirror of the `CC#100 = index` repeat
+while playing, so a host that missed the stop edge (USB gap) learns it within a second. A node
+that never heard its master still says nothing.
+
 ### Controlled flooding (`0x05` `MeshRelayHeader`, v2.2 — #t-024)
 
 Relays `MediaSyncPacket` only (v2.2 scope; see the #t-020 note for why beacons/`ReceiverInfo`
@@ -156,6 +165,7 @@ flooding loop impossible by construction.
 | `CC100_REPEAT_INTERVAL_MS` | 1000 (0 disables) |
 | `CC7_REPEAT_INTERVAL_MS` *(2.0.4)* | 1000 (0 disables) |
 | `LINK_LOST_TIMEOUT_MS` | 10 000 |
+| `NOWDE_FREEWHEEL_MAX_MS` *(2.0.5)* | 180 000 (freewheel bound, overridable per env) |
 | `CLOCK_DESYNC_THRESHOLD_MS` | 200 |
 | `ORIGIN_LOCK_RELEASE_MS` *(v2.2)* | 2000 (silence before an adopted lock may switch master) |
 | `MEDIASYNC_MAX_GAP` *(v2.2)* | 100 (largest `seq` jump still read as loss; 10 s at 10 Hz) |
@@ -164,6 +174,200 @@ flooding loop impossible by construction.
 | `TRANSMISSION_DELAY_US` | 1300 (ESPNowMeshClock one-way estimate) |
 | `ESPNowMeshClock(...)` | interval 1000 ms, slew α 0.25, large step 10 ms, timeout 5 s, jitter 10 % |
 | `MAX_SENDERS` / `MAX_RECEIVERS` | 10 / 10 |
+
+### The v2.3 event frame (`0x04`)
+
+Type `0x04` was **reserved and left unimplemented** by v2.0 (charter §(b)), so it has no
+installed base and no compat constraint — and §(b) freezes it the moment one fielded node
+parses it. The layout below is therefore fixed *before* any firmware exists, which is the only
+moment it is free. Nothing in this section runs yet: the frame is built by #t-037, scheduled
+by #t-038, its lead derived by #t-039 and benched by #t-040.
+
+One master frame carries **many MIDI events**, batched over a 5 ms window. Batching, not
+addressing, is where the airtime saving comes from: 14 events in one 226-byte frame instead of
+14 separate 37-byte frames, on a radio whose real cost is the per-frame overhead.
+
+#### Header — 30 bytes, then the records
+
+| Off | Field | Type | Meaning |
+|-----|-------|------|---------|
+| 0 | `type` | u8 | `0x04` |
+| 1 | `hdrLen` | u8 | bytes from `type` to the first record. **30** in v2.3. |
+| 2 | `flags` | u8 | bit 0 `SNAPSHOT`; bits 1–7 reserved, sent as 0 |
+| 3 | `recLen` | u8 | bytes per record, all records. **7** in v2.3. |
+| 4 | `groupMask` | u16 | channel mask, bit *N* = MIDI channel *N*+1. `0xFFFF` = every channel. |
+| 6 | `seq` | u16 | the origin's **frame** counter for `0x04`, free-running, wraps |
+| 8 | `fireAt` | u32 | mesh-time ms at which record 0 fires (see below) |
+| 12 | `newCount` | u8 | records that are new in this frame, ≤ `14` |
+| 13 | `carryCount` | u8 | records repeated from the previous frame, ≤ `14` |
+| 14 | `layer` | char[16] | NUL-padded, exactly as `MediaSyncPacket` and `ReceiverInfo` |
+
+`newCount` records come first, in ascending `offset`; the `carryCount` repeated ones follow.
+
+#### Record — 7 bytes
+
+| Off | Field | Type | Meaning |
+|-----|-------|------|---------|
+| 0 | `status` | u8 | a MIDI **channel-voice** status byte, `0x80`–`0xEF`, channel in the low nibble |
+| 1 | `data1` | u8 | 0–127 |
+| 2 | `data2` | u8 | 0–127; **0** for the one-data-byte statuses `0xCn` (Program Change) and `0xDn` (Channel Pressure) |
+| 3 | `evSeq` | u16 | the origin's **event** counter, free-running, wraps |
+| 5 | `offset` | i16 | ms relative to the frame's `fireAt`; **negative** on a carried record |
+
+System real-time (`0xF8`–`0xFF`), SysEx and MTC are **never** relayed here: transport state
+already travels in `MediaSyncPacket.state` and MTC is regenerated locally by each slave from
+the mesh clock. A record whose `status` falls outside `0x80`–`0xEF` is skipped; the rest of the
+frame is still processed.
+
+#### The one rule that keeps this extensible
+
+**A receiver locates record 0 at `hdrLen` and strides by `recLen` — never by its own compiled
+`sizeof`.** That is what lets §(b) hold on a frame whose tail is a variable array: a later
+generation appends header fields after `layer` (growing `hdrLen`) or record fields after
+`offset` (growing `recLen`), and a v2.3 node still finds every field it knows. Unknown `flags`
+bits are ignored, never a reason to drop a frame.
+
+Validation, in order — the same *reject-only-too-short* posture as the SysEx parsers:
+
+1. `len < 30`, or `hdrLen < 30`, or `recLen < 7` → drop.
+2. `len < hdrLen + (newCount + carryCount) × recLen` → drop, the frame is truncated.
+3. `len` greater than that → **accept** and ignore the tail.
+
+#### `fireAt`, and why events are scheduled rather than played on arrival
+
+`fireAt` is mesh time in ms (`meshMillis()`), the same clock and the same unit as
+`MediaSyncPacket.meshTimestamp`; it wraps at 2^32 ms ≈ 49.7 days, so compare it as
+`(int32_t)(fireAt − meshMillis())` and never as an unsigned difference. A slave **schedules**
+each record for `fireAt + offset` instead of emitting it on arrival, which is what makes a
+chord land together and keep doing so across a relay hop. Millisecond granularity costs
+nothing here: every record of a chord shares one `fireAt + offset`, so they leave in the same
+tick — the quantisation moves the whole chord, never its notes apart.
+
+The sender computes `fireAt = <capture mesh time> + MIDI_EVENT_LEAD_MS`. **The lead is not a
+wire field**, so it can change without touching this frame. #t-039 derived it from the
+flooding parameters #t-024 froze: `MAX_HOPS` (3) × `MESH_RELAY_DELAY_MAX_MS` (30 ms) =
+**90 ms** of worst-case relay latency before clock error (`src/nowde_config.h`, overridable
+per env). A lead shorter than that makes relayed events fire late, silently, and only on the
+far side of a hop.
+
+With `newCount == 0` — a pure carry-over frame, or a `SNAPSHOT` — `fireAt` is the origin's
+`meshMillis()` at mint.
+
+#### Carry-over: depth 1, and what the 250 B actually buys
+
+Instead of retries, **each frame repeats the previous frame's new records** with their
+`offset` re-based on the current `fireAt` (so they arrive negative). A slave that missed a
+frame still gets its events one frame later; `evSeq` is what stops the node that received
+both from firing them twice.
+
+**The depth is 1 frame, and it carries only the previous frame's *new* records — never its
+carried ones.** Repeating repeats would grow a frame geometrically and put an unbounded
+history on a bounded radio. That single choice is what bounds the frame, and with it the
+budget closes:
+
+| Quantity | Value | Where it comes from |
+|----------|-------|---------------------|
+| ESP-NOW payload MTU | 250 B | the radio |
+| relay envelope | 10 B | `0x05` `MeshRelayHeader { type, origin[6], seq u16, hop u8 }`, built by #t-024 and `static_assert`ed at 10 B. A forward re-wraps the inner packet and never nests envelopes, so it costs 10 B at any hop count |
+| header | 30 B | table above |
+| record | 7 B | table above |
+| **new records per frame** | **14** | `(250 − 10 − 30) ÷ 7 ÷ (1 + depth)` = 15, taken down one: 15 lands on 250 B exactly, leaving no margin should the envelope ever grow |
+| records on the wire | ≤ 28 | `newCount + carryCount` |
+| **frame size** | ≤ **226 B** | `30 + 28 × 7`; **236 B** wrapped in the relay envelope, 14 B spare |
+
+A `0x04` frame **must** survive that envelope — a chord is expected to land at two hops — so
+250 B is not the budget, 240 B is. This is the reconciliation the design note owed: §(4) wrote
+*"≤ 40 events per frame"* before the per-event size existed and before flooding had an
+envelope, and 40 does not fit — `30 + 40 × 7 + 10 = 320 B`. **40 becomes 14 new + ≤ 14
+carried.** `tools/selftest.py` asserts the arithmetic both ways, so the day #t-024 widens the
+envelope the gate says so instead of the fleet.
+
+The cap bounds a *frame*, never the stream: a 5 ms window that produces more than 14 events
+emits a second frame immediately, in the same tick. **Nothing is ever dropped for the cap** —
+which is the only reason a number this small is safe to freeze. Sustained, it is 2 800
+events/s, some 23× the densest stream this link is known to carry (the 120 msg/s MTC flood of
+`docs/usb-in-stall-plan-2026-09-17.md`).
+
+#### Relaying a `0x04` frame: three things the v2.2 relay does not do yet
+
+The v2.2 relay (#t-024) carries `MediaSyncPacket` only, and three of its choices depend on
+that. None of them changes this frame. All three are #t-037's to change before any node wraps
+a `0x04` frame in `0x05`:
+
+1. **The `0x05` receive path never reads the inner `type`.** It hands every inner packet to
+   the `MediaSync` parser. A node subscribed to `*` would accept a relayed `0x04` frame as a
+   `MediaSync` from the master it follows, and read byte 17 (the fourth character of the
+   frame's `layer`) as the media index. A `0x05` receiver must dispatch on the inner `type`
+   and ignore a type it does not play. This is cheapest in the first relay build that reaches
+   the fleet: every node fielded without that check has to be reflashed before any master
+   relays a `0x04` frame.
+2. **Relay dedup keeps one `lastSeq` per origin.** `MediaSyncPacket.seq` and this frame's
+   `seq` are independent counters from the same origin, so `0x04` needs the key
+   `(origin, type, seq)` or a table of its own. Sharing one entry either forwards duplicates
+   or suppresses a frame that nobody forwarded.
+3. **A pending forward holds `sizeof(MediaSyncPacket)` (31 B)**, and `handleFloodCandidate`
+   clamps the inner packet to that size. A `0x04` frame needs 226 B; truncated, it fails
+   validation step 2 at every node downstream.
+
+#### Slave-side handling of a `0x04` frame
+
+1. Drop unless `layer` matches the subscribed layer (or the subscribed layer is `*`) — the
+   same filter as `MediaSyncPacket`, and in v2.3 the *only* filter: see `groupMask` below.
+2. Drop unless the frame's origin is the master this node follows — the origin lock that
+   arrived with broadcast `MediaSync` (#t-021) applies unchanged, and for the same reason:
+   under broadcast delivery nothing else keeps two installations in earshot apart.
+3. For each record, skip it if `evSeq` was already fired (dedup), else schedule it at
+   `fireAt + offset`.
+4. A record whose time has already passed by more than `MIDI_EVENT_MAX_STALE_MS` is dropped;
+   one inside that window fires **immediately**. A Note On 90 ms late still beats a Note On
+   lost, which is the entire point of carry-over. 150 ms is the stated default: 60 ms above
+   the 90 ms lead, below the 200 ms `CLOCK_DESYNC_THRESHOLD_MS` at which the mesh clock stops
+   being trusted at all. It is slave-side policy, not a wire field: #t-039 set the lead and
+   left this unchanged, and it moves with the lead if the lead ever does.
+5. Re-emit on the record's original channel (a slave-side remap is configuration, never wire).
+
+**Where the scheduler has to live.** `ESPNOW_Task` runs on a **10 ms** period, which is coarser
+than the accuracy this frame exists to deliver — a chord scheduled there lands with ±10 ms of
+tick jitter and `fireAt` buys nothing. The due-record check belongs on **`MIDI_Task`'s 1 ms
+tick**, which is also the only context allowed to write TinyUSB (see *one writer, one active
+IN endpoint*). Relayed events reach the host through `usbOutMidi()` like everything else.
+
+#### `groupMask`, and the assumption v2.3 ships instead of a decision
+
+The field is on the wire from the first frame; **v2.3 does not use it.** Masters send `0xFFFF`
+and slaves ignore it, filtering `0x04` on the layer they already carry, exactly as they filter
+`MediaSync`. That is a *written, reversible assumption* — no job in the hub today wants the
+MIDI split to differ from the layer split — and not a ruling that they never should.
+
+Reversing it is additive on the wire and the frame does not change, which is why the field
+ships now. But it is **not transparent on the mesh**: a v2.3-vintage node ignores the mask, so
+a later master that narrows it to one group would have that node fire events addressed to
+another. Turning group addressing on therefore costs a reflash of **every node on the affected
+layer**, not one row of firmware on the master. Cheap, and worth knowing before the day it is
+wanted rather than after.
+
+#### `SNAPSHOT` (`flags` bit 0)
+
+A periodic (≈1 Hz) full CC state dump for the layer, so a node that joined after the
+carry-over window closed converges instead of waiting for the next change. Records are applied
+as **current state, immediately** — `offset` is 0 and nothing is scheduled — and a snapshot
+carries controller messages only: replaying a Note On from a snapshot would retrigger it.
+Built by #t-038; the bit is frozen here so the frame does not have to change to gain it.
+
+#### Frame `seq` and record `evSeq` are two counters, on purpose
+
+`seq` identifies a **frame** and is what #t-024's relay envelope dedups on, so a flooded copy
+is forwarded once. `evSeq` identifies an **event** and is what carry-over dedups on, so a
+repeated record fires once. Two layers, two jobs: collapse them into one counter and you lose
+either the repeat (the carried copy looks like a duplicate frame) or the relay suppression (a
+frame arriving twice by two paths looks like new events).
+
+#### What a node that does not know `0x04` does
+
+Nothing: `onDataRecv()` switches on the first byte and an unrecognised type falls through
+`default:`. So a v1.2 node, and every v2.0–v2.2 node, ignores a `0x04` frame rather than
+mis-parsing it — by construction, not by a length check. This is the half of the charter that
+lets v2.3 masters share a mesh with fielded slaves.
 
 ## 3. MIDI output contract (slave → host)
 
@@ -176,8 +380,13 @@ flooding loop impossible by construction.
   gets a full timecode 30 times a second. Hours wrap at 24.
 - *(v2)* **MTC full-frame** `F0 7F 7F 01 01 hh mm ss ff F7` on start and on position jumps > 1 s (loop wrap, seek).
 - *(v2)* **MIDI Start** (`FA`) on stopped → playing, **Stop** (`FC`) on playing → stopped.
-- *(v2)* Relayed **Note / CC / Program Change** from the master host, on their
-  original channel, emitted at their scheduled mesh time.
+- *(v2.3, not yet implemented)* Relayed **channel-voice messages** from the master host —
+  Note, CC, Program Change, Channel Pressure, Pitch Bend — on their original channel, emitted
+  at their scheduled mesh time and never earlier. The transport is
+  [the `0x04` event frame](#the-v23-event-frame-0x04). A host sees ordinary MIDI: there is no
+  new message for it to learn, and **nothing above changes** — `CC#100` and MTC keep their
+  meaning and their cadence, so a player written against the v1.2 contract is not touched by
+  v2.3 arriving on the same port.
 
 ### USB: one writer, one active IN endpoint *(v2)*
 
@@ -205,6 +414,29 @@ within a second while playing). A momentary stall (a `RUNNING_STATE` burst) keep
 | `ESPNOW_Task` | 1 | 10 | 10 ms | beacons, tables, link-lost, MTC generation, `meshClock.loop()` |
 
 NVS namespace `nowde`: `layer` (string). *(v2: `role` u8 — 0 slave, 1 master, 0x7F auto.)*
+
+## Radio watchdog *(2.0.5)*
+
+`src/watchdog.cpp`. Restarts a node whose radio is provably dead — the field saw a master whose
+every `esp_now_send()` returned `ESP_ERR_ESPNOW_NO_MEM` for 19 h while USB-MIDI stayed healthy,
+recovered by a plain `esp_restart()` — and nothing else. WiFi power save is also off since 2.0.5
+(`esp_wifi_set_ps(WIFI_PS_NONE)`, logged at boot).
+
+| Role | Trigger | Log |
+|------|---------|-----|
+| master (sender) | every relay send failed `NO_MEM` for 30 s with the host still feeding it (one successful send ends the streak; since v2.2 the controlled-flooding forwards go through the same `relaySend()` and count too) | `[WATCHDOG] relay NO_MEM for N s -> esp_restart` |
+| master (sender) | the table held ≥ 1 connected slave this boot and has been empty for 120 s | `[WATCHDOG] no slave for N s -> esp_restart` |
+| slave | a master was heard this boot and none for 300 s | `[WATCHDOG] no sender for N s -> esp_restart` |
+
+Bounds: nothing fires in the first 120 s of a boot, never under an OTA, and a restart is only
+allowed once the boot has lived a **backoff** kept in RTC memory (survives `esp_restart()`, not
+a power-on): 5 min, doubled at each watchdog restart of a boot that never had a healthy radio
+for 60 s or that fires within 10 min of the previous one, capped at 60 min, back to 5 min once
+the radio is healthy for 60 s (master: ≥ 1 connected slave; slave: ≥ 1 master heard). Until
+then the trigger is *held* and logs so once a minute. A node that never had a peer this boot
+never fires, so a fleet switched off around it costs it one restart at most. The boot after a
+watchdog restart logs `[WATCHDOG] boot after watchdog restart #n: <reason>`; `bootReason` in
+`HELLO` is `SW` (3), the restart count rides in the `HELLO` trailer.
 
 ## v2 role resolution (boot)
 
