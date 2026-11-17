@@ -1,5 +1,6 @@
 #include "midi.h"
 
+#include "midi_event.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "sysex.h"
@@ -137,6 +138,11 @@ void midiProcess() {
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
     uint8_t cin = packet.header & 0x0F;
 
+    if (cin >= 0x8 && cin <= 0xE) {
+      midiEventCapture(packet.byte1, packet.byte2, packet.byte3);   // v2.3 0x04 (#t-037): ONE call
+      continue;
+    }
+
     if (cin >= 0x4 && cin <= 0x7) {
       int dataBytes = 0;
       if (cin == 0x4) {
@@ -193,4 +199,6 @@ void midiProcess() {
       }
     }
   }
+
+  midiEventTick();   // v2.3 0x04 (#t-037): close a 5 ms batch, or send the owed carry-over
 }

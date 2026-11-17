@@ -368,6 +368,9 @@ static_assert(sizeof(MeshRelayHeader) == 10,
 #define MIDI_EVENT_MAX_RECORDS (MIDI_EVENT_MAX_NEW * (1 + MIDI_EVENT_CARRY_DEPTH))
 #define MIDI_EVENT_FRAME_MAX   (MIDI_EVENT_HEADER_LEN + MIDI_EVENT_MAX_RECORDS * MIDI_EVENT_RECORD_LEN)
 #define MIDI_EVENT_FLAG_SNAPSHOT 0x01
+// The master's batch window (docs/PROTOCOL.md: "batched over a 5 ms window"). Sender-side
+// policy, not a wire field: a slave never reads it.
+#define MIDI_EVENT_BATCH_MS    5
 
 struct MidiEventHeader {
   uint8_t type = ESPNOW_MSG_MIDI_EVENT;
