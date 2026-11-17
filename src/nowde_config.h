@@ -147,9 +147,10 @@
 // One relay-dedup slot per master this node could ever see relaying for -- MAX_SENDERS is the
 // existing bound on how many senders a node tracks at all, so this can never be the tighter one.
 #define MAX_RELAY_ORIGINS MAX_SENDERS
-// Concurrent in-flight forwards, mid their randomized delay. At ~10 Hz traffic and a <=30 ms
-// window this is generous headroom, not a measured ceiling.
-#define MAX_PENDING_RELAYS 8
+// Concurrent in-flight forwards, mid their randomized delay. MediaSync alone (~10 Hz) needs one;
+// a 0x04 frame can follow every 5 ms batch, so a 30 ms window holds up to 6 of those beside it.
+// 12 is headroom over that sum, not a measured ceiling (#t-037).
+#define MAX_PENDING_RELAYS 12
 
 // v2.3 FIXED LEAD (#t-039, topology note §(4): "fire-at mesh timestamps with a fixed lead"):
 // a sender picks fireAt = now + MIDI_EVENT_LEAD_MS (mesh time) so a MIDI_EVENT frame (0x04,
@@ -357,9 +358,55 @@ static_assert(sizeof(MeshRelayHeader) == 10,
 // v2.2 controlled flooding (#t-024): last (origin, seq) this node has already forwarded,
 // scheduled, or suppressed -- one entry per master it has ever relayed for. Same shape as
 // SenderEntry on purpose; a relay-dedup table is the same kind of "who have we heard" record.
+// v2.3 MIDI_EVENT (0x04): the frame's layout is FROZEN in docs/PROTOCOL.md "The v2.3 event
+// frame". These are what a v2.3 SENDER emits; a receiver strides by the frame's own hdrLen and
+// recLen, never by these. tools/selftest.py checks the four literals against the reference codec.
+#define MIDI_EVENT_HEADER_LEN  30
+#define MIDI_EVENT_RECORD_LEN  7
+#define MIDI_EVENT_MAX_NEW     14
+#define MIDI_EVENT_CARRY_DEPTH 1
+#define MIDI_EVENT_MAX_RECORDS (MIDI_EVENT_MAX_NEW * (1 + MIDI_EVENT_CARRY_DEPTH))
+#define MIDI_EVENT_FRAME_MAX   (MIDI_EVENT_HEADER_LEN + MIDI_EVENT_MAX_RECORDS * MIDI_EVENT_RECORD_LEN)
+#define MIDI_EVENT_FLAG_SNAPSHOT 0x01
+
+struct MidiEventHeader {
+  uint8_t type = ESPNOW_MSG_MIDI_EVENT;
+  uint8_t hdrLen;       // bytes from `type` to record 0 (30 in v2.3)
+  uint8_t flags;        // bit0 SNAPSHOT; the rest reserved, ignored on receive
+  uint8_t recLen;       // bytes per record (7 in v2.3)
+  uint16_t groupMask;   // bit N = MIDI channel N+1
+  uint16_t seq;         // the origin's 0x04 FRAME counter -- independent of MediaSyncPacket.seq
+  uint32_t fireAt;      // mesh-time ms at which record 0 fires
+  uint8_t newCount;
+  uint8_t carryCount;
+  char layer[MAX_LAYER_LENGTH];
+} __attribute__((packed));
+static_assert(sizeof(MidiEventHeader) == MIDI_EVENT_HEADER_LEN,
+              "the 0x04 header is 30 B on the wire (docs/PROTOCOL.md)");
+static_assert(offsetof(MidiEventHeader, seq) == 6 && offsetof(MidiEventHeader, newCount) == 12 &&
+              offsetof(MidiEventHeader, layer) == 14,
+              "0x04 header offsets are frozen (docs/PROTOCOL.md)");
+static_assert(MIDI_EVENT_FRAME_MAX == 226, "a full 0x04 frame is 226 B (docs/PROTOCOL.md)");
+
+// The largest inner packet a 0x05 forward carries, verbatim (#t-037): the 0x04 frame. Before
+// v2.3 this was sizeof(MediaSyncPacket), and a longer inner packet was clamped to it.
+#define MESH_RELAY_PAYLOAD_MAX MIDI_EVENT_FRAME_MAX
+static_assert(MESH_RELAY_PAYLOAD_MAX >= sizeof(MediaSyncPacket), "the forward buffer holds both kinds");
+
+// Relay dedup is keyed (origin, type, seq) -- docs/PROTOCOL.md "Relaying a 0x04 frame", change 2:
+// MediaSyncPacket.seq and the 0x04 frame's seq are independent counters from one origin, so each
+// relayed type keeps its own window. A window, not a last-seq: 0x04 frames can follow each other
+// every 5 ms, inside one 5-30 ms relay delay, so a relayed copy of frame N routinely arrives after
+// frame N+1 -- a last-seq would take it for new and forward it again.
+#define MESH_RELAY_KINDS 2      // [0] MediaSync 0x03, [1] MidiEvent 0x04
+struct RelaySeqWindow {
+  uint16_t top = 0;     // newest seq handled
+  uint32_t seen = 0;    // bit i = (top - i) handled; 0 = nothing handled yet
+};
+
 struct RelayOriginEntry {
   uint8_t mac[6] = {0};
-  uint16_t lastSeq = 0;
+  RelaySeqWindow kinds[MESH_RELAY_KINDS];  // one per relayed type: see meshRelayKind()
   bool valid = false;
 };
 

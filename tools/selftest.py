@@ -212,4 +212,23 @@ pb = nm.parse_midi_event(bad)
 check(pb is not None and [r['voice'] for r in pb['new']] == [False, True, True, True],
       f"clock byte flagged non-voice, frame still read {pb}")
 
+# The firmware states the same frame sizes (src/nowde_config.h); its relay sizes the 0x05 forward
+# buffer from them (#t-037 slice 1), so a drift between doc, codec and C is a truncated frame.
+import re  # noqa: E402
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'nowde_config.h')) as fh:
+    cfg = fh.read()
+for name in ('HEADER_LEN', 'RECORD_LEN', 'MAX_NEW', 'CARRY_DEPTH'):
+    m = re.search(rf'^#define MIDI_EVENT_{name}\s+(\d+)\b', cfg, re.M)
+    check(m and int(m.group(1)) == getattr(nm, 'MIDI_EVENT_' + name),
+          f"nowde_config.h MIDI_EVENT_{name} matches the codec")
+check(nm.MIDI_EVENT_FRAME_MAX == 226, "a full 0x04 frame is 226 B")
+check(nm.MESH_RELAY_LEN + nm.MIDI_EVENT_FRAME_MAX <= 250, "a full 0x04 frame fits the 0x05 envelope")
+# The relay keys dedup on the frame's own seq: offset 6, LE, independent of MediaSync's seq.
+rs = nm.midi_event_frame('main', [nm.midi_record(0x90, 60, 100, ev_seq=1)], seq=0xBEEF)
+check(rs[6:8] == [0xEF, 0xBE] and nm.parse_midi_event(rs)['seq'] == 0xBEEF, "0x04 seq at offset 6")
+full = nm.midi_event_frame('main', [nm.midi_record(0x90, 60, 100, ev_seq=i) for i in range(14)],
+                           [nm.midi_record(0x90, 61, 100, ev_seq=i) for i in range(14)])
+check(len(full) == nm.MIDI_EVENT_FRAME_MAX and nm.parse_midi_event(full) is not None,
+      f"14 new + 14 carried is exactly the max frame ({len(full)} B)")
+
 print("nowde_mesh selftest OK")
