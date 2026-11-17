@@ -153,7 +153,7 @@
 
 // v2.3 FIXED LEAD (#t-039, topology note §(4): "fire-at mesh timestamps with a fixed lead"):
 // a sender picks fireAt = now + MIDI_EVENT_LEAD_MS (mesh time) so a MIDI_EVENT frame (0x04,
-// reserved below) has cleared its worst-case relay path -- MAX_HOPS hops, each up to
+// layout frozen below) has cleared its worst-case relay path -- MAX_HOPS hops, each up to
 // MESH_RELAY_DELAY_MAX_MS of randomized forward delay -- before that time is due. Derived, not
 // chosen, off the two frozen constants above: MAX_HOPS(3) x MESH_RELAY_DELAY_MAX_MS(30 ms) =
 // 90 ms -- the exact figure #t-024's own MAX_HOPS comment already worked out and named this

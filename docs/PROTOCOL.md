@@ -244,10 +244,11 @@ nothing here: every record of a chord shares one `fireAt + offset`, so they leav
 tick — the quantisation moves the whole chord, never its notes apart.
 
 The sender computes `fireAt = <capture mesh time> + MIDI_EVENT_LEAD_MS`. **The lead is not a
-wire field** and is deliberately not numbered here: #t-039 derives it from the frozen flooding
-parameters of §(2) (a random 5–30 ms forward delay on each of `MAX_HOPS` 2–3 → 60–90 ms
-worst-case relay latency before clock error), which #t-024 fixes. A lead shorter than that
-makes relayed events fire late, silently, and only on the far side of a hop.
+wire field**, so it can change without touching this frame. #t-039 derived it from the
+flooding parameters #t-024 froze: `MAX_HOPS` (3) × `MESH_RELAY_DELAY_MAX_MS` (30 ms) =
+**90 ms** of worst-case relay latency before clock error (`src/nowde_config.h`, overridable
+per env). A lead shorter than that makes relayed events fire late, silently, and only on the
+far side of a hop.
 
 With `newCount == 0` — a pure carry-over frame, or a `SNAPSHOT` — `fireAt` is the origin's
 `meshMillis()` at mint.
@@ -267,10 +268,10 @@ budget closes:
 | Quantity | Value | Where it comes from |
 |----------|-------|---------------------|
 | ESP-NOW payload MTU | 250 B | the radio |
-| relay envelope | 10 B | `0x05 MeshRelay { origin[6], seq u16, hop u8 }` + type, reserved for #t-024 |
+| relay envelope | 10 B | `0x05` `MeshRelayHeader { type, origin[6], seq u16, hop u8 }`, built by #t-024 and `static_assert`ed at 10 B. A forward re-wraps the inner packet and never nests envelopes, so it costs 10 B at any hop count |
 | header | 30 B | table above |
 | record | 7 B | table above |
-| **new records per frame** | **14** | `(250 − 10 − 30) ÷ 7 ÷ (1 + depth)` = 15, taken down one: 15 lands on 250 B exactly, with no margin for the envelope #t-024 has not built yet |
+| **new records per frame** | **14** | `(250 − 10 − 30) ÷ 7 ÷ (1 + depth)` = 15, taken down one: 15 lands on 250 B exactly, leaving no margin should the envelope ever grow |
 | records on the wire | ≤ 28 | `newCount + carryCount` |
 | **frame size** | ≤ **226 B** | `30 + 28 × 7`; **236 B** wrapped in the relay envelope, 14 B spare |
 
@@ -287,6 +288,27 @@ which is the only reason a number this small is safe to freeze. Sustained, it is
 events/s, some 23× the densest stream this link is known to carry (the 120 msg/s MTC flood of
 `docs/usb-in-stall-plan-2026-09-17.md`).
 
+#### Relaying a `0x04` frame: three things the v2.2 relay does not do yet
+
+The v2.2 relay (#t-024) carries `MediaSyncPacket` only, and three of its choices depend on
+that. None of them changes this frame. All three are #t-037's to change before any node wraps
+a `0x04` frame in `0x05`:
+
+1. **The `0x05` receive path never reads the inner `type`.** It hands every inner packet to
+   the `MediaSync` parser. A node subscribed to `*` would accept a relayed `0x04` frame as a
+   `MediaSync` from the master it follows, and read byte 17 (the fourth character of the
+   frame's `layer`) as the media index. A `0x05` receiver must dispatch on the inner `type`
+   and ignore a type it does not play. This is cheapest in the first relay build that reaches
+   the fleet: every node fielded without that check has to be reflashed before any master
+   relays a `0x04` frame.
+2. **Relay dedup keeps one `lastSeq` per origin.** `MediaSyncPacket.seq` and this frame's
+   `seq` are independent counters from the same origin, so `0x04` needs the key
+   `(origin, type, seq)` or a table of its own. Sharing one entry either forwards duplicates
+   or suppresses a frame that nobody forwarded.
+3. **A pending forward holds `sizeof(MediaSyncPacket)` (31 B)**, and `handleFloodCandidate`
+   clamps the inner packet to that size. A `0x04` frame needs 226 B; truncated, it fails
+   validation step 2 at every node downstream.
+
 #### Slave-side handling of a `0x04` frame
 
 1. Drop unless `layer` matches the subscribed layer (or the subscribed layer is `*`) — the
@@ -298,10 +320,10 @@ events/s, some 23× the densest stream this link is known to carry (the 120 msg/
    `fireAt + offset`.
 4. A record whose time has already passed by more than `MIDI_EVENT_MAX_STALE_MS` is dropped;
    one inside that window fires **immediately**. A Note On 90 ms late still beats a Note On
-   lost, which is the entire point of carry-over. 150 ms is the stated default: above §(2)'s
-   60–90 ms worst-case relay latency with margin, below the 200 ms `CLOCK_DESYNC_THRESHOLD_MS`
-   at which the mesh clock stops being trusted at all. It is slave-side policy, not a wire
-   field, so #t-039 may revise it with the lead.
+   lost, which is the entire point of carry-over. 150 ms is the stated default: 60 ms above
+   the 90 ms lead, below the 200 ms `CLOCK_DESYNC_THRESHOLD_MS` at which the mesh clock stops
+   being trusted at all. It is slave-side policy, not a wire field: #t-039 set the lead and
+   left this unchanged, and it moves with the lead if the lead ever does.
 5. Re-emit on the record's original channel (a slave-side remap is configuration, never wire).
 
 **Where the scheduler has to live.** `ESPNOW_Task` runs on a **10 ms** period, which is coarser
