@@ -217,7 +217,7 @@ check(pb is not None and [r['voice'] for r in pb['new']] == [False, True, True, 
 import re  # noqa: E402
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'nowde_config.h')) as fh:
     cfg = fh.read()
-for name in ('HEADER_LEN', 'RECORD_LEN', 'MAX_NEW', 'CARRY_DEPTH'):
+for name in ('HEADER_LEN', 'RECORD_LEN', 'MAX_NEW', 'CARRY_DEPTH', 'MAX_STALE_MS'):
     m = re.search(rf'^#define MIDI_EVENT_{name}\s+(\d+)\b', cfg, re.M)
     check(m and int(m.group(1)) == getattr(nm, 'MIDI_EVENT_' + name),
           f"nowde_config.h MIDI_EVENT_{name} matches the codec")

@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "mesh_relay.h"
+#include "midi_event.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "receiver_mode.h"
@@ -104,10 +105,13 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       break;
 
     case ESPNOW_MSG_MIDI_EVENT:
-      // v2.3 (#t-037). Nothing on this node plays the frame yet -- the slave leg is slice 3 --
-      // but the relay carries it now, on the same terms as a direct 0x03: a complete frame,
-      // keyed on its own 0x04 `seq` (docs/PROTOCOL.md "Relaying a 0x04 frame").
+      // v2.3 (#t-037). Consumed like a direct 0x03 -- a slave plays it, the sender IS the origin
+      // -- and relayed on the same terms: a complete frame, keyed on its own 0x04 `seq`
+      // (docs/PROTOCOL.md "Relaying a 0x04 frame").
       if (midiEventFrameComplete(data, len)) {
+        if (receiverModeEnabled && !senderModeEnabled) {
+          midiEventReceive(info->src_addr, data, len);
+        }
         const MidiEventHeader* event = reinterpret_cast<const MidiEventHeader*>(data);
         handleFloodCandidate(info->src_addr, event->seq, 0, data, len, false);
       }
@@ -145,6 +149,9 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
         case ESPNOW_MSG_MIDI_EVENT:
           if (!midiEventFrameComplete(inner, innerLen)) {
             break;  // truncated or malformed (validation steps 1-2) -- not worth forwarding
+          }
+          if (receiverModeEnabled && !senderModeEnabled) {
+            midiEventReceive(header->origin, inner, innerLen);   // the envelope's origin
           }
           handleFloodCandidate(header->origin, header->seq, header->hop, inner, innerLen, true);
           break;

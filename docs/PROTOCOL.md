@@ -352,7 +352,9 @@ A periodic (≈1 Hz) full CC state dump for the layer, so a node that joined aft
 carry-over window closed converges instead of waiting for the next change. Records are applied
 as **current state, immediately** — `offset` is 0 and nothing is scheduled — and a snapshot
 carries controller messages only: replaying a Note On from a snapshot would retrigger it.
-Built by #t-038; the bit is frozen here so the frame does not have to change to gain it.
+Built by #t-037 with the frame (the master walks its CC table about once a second,
+≤ 14 records per frame, one batch window apart; a slave plays each controller record at once);
+the bit is frozen here so the frame does not have to change to gain it.
 
 #### Frame `seq` and record `evSeq` are two counters, on purpose
 

@@ -371,6 +371,18 @@ static_assert(sizeof(MeshRelayHeader) == 10,
 // The master's batch window (docs/PROTOCOL.md: "batched over a 5 ms window"). Sender-side
 // policy, not a wire field: a slave never reads it.
 #define MIDI_EVENT_BATCH_MS    5
+// Slave-side policy (docs/PROTOCOL.md "Slave-side handling", rule 4): a record later than this
+// past its fire time is dropped, one inside it fires at once. 60 ms above the 90 ms lead, below
+// the 200 ms CLOCK_DESYNC_THRESHOLD_MS. Moves with the lead if the lead ever does.
+#define MIDI_EVENT_MAX_STALE_MS 150
+// SNAPSHOT (flags bit 0): the master's full CC state, about once a second, so a late joiner
+// converges. A pass that needs several frames sends them MIDI_EVENT_BATCH_MS apart.
+#define MIDI_EVENT_SNAPSHOT_MS 1000
+// The slave's evSeq dedup: a sliding window over the origin's event counter. 128 events is ~9
+// full frames -- wider than any relayed copy's delay -- and a window idle this long (a master
+// that rebooted and restarted its counter) is forgotten rather than read as replays.
+#define MIDI_EVENT_DEDUP_WINDOW  128
+#define MIDI_EVENT_DEDUP_IDLE_MS 1000
 
 struct MidiEventHeader {
   uint8_t type = ESPNOW_MSG_MIDI_EVENT;
