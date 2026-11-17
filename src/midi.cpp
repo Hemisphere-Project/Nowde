@@ -1,5 +1,6 @@
 #include "midi.h"
 
+#include "midi_event.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "sysex.h"
@@ -29,6 +30,7 @@ Smpte toSmpte(uint32_t positionMs) {
 
 void midiInit() {
   MIDI.begin();
+  midiEventInit();   // v2.3 0x04 (#t-038): the slave's hand-off queue, before ESP-NOW is up
 }
 
 void midiSendCC(uint8_t cc, uint8_t value) {
@@ -128,7 +130,8 @@ bool midiReadPacket(midiEventPacket_t* packet) {
 void midiProcess() {
   midiEventPacket_t packet;
 
-  usbOutPump();   // MIDI task: everything queued for the host goes out here
+  midiEventFire();   // v2.3 0x04 (#t-038): scheduled records whose mesh time has come
+  usbOutPump();      // MIDI task: everything queued for the host goes out here
 
   while (midiReadPacket(&packet)) {
     if (!hostLinked()) {
@@ -136,6 +139,11 @@ void midiProcess() {
     }
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
     uint8_t cin = packet.header & 0x0F;
+
+    if (cin >= 0x8 && cin <= 0xE) {
+      midiEventCapture(packet.byte1, packet.byte2, packet.byte3);   // v2.3 0x04 (#t-037): ONE call
+      continue;
+    }
 
     if (cin >= 0x4 && cin <= 0x7) {
       int dataBytes = 0;
@@ -193,4 +201,6 @@ void midiProcess() {
       }
     }
   }
+
+  midiEventTick();   // v2.3 0x04 (#t-037): close a 5 ms batch, or send the owed carry-over
 }

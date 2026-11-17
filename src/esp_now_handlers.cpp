@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "mesh_relay.h"
+#include "midi_event.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "receiver_mode.h"
@@ -103,23 +104,61 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       }
       break;
 
+    case ESPNOW_MSG_MIDI_EVENT:
+      // v2.3 (#t-037). Consumed like a direct 0x03 -- a slave plays it, the sender IS the origin
+      // -- and relayed on the same terms: a complete frame, keyed on its own 0x04 `seq`
+      // (docs/PROTOCOL.md "Relaying a 0x04 frame").
+      if (midiEventFrameComplete(data, len)) {
+        if (receiverModeEnabled && !senderModeEnabled) {
+          midiEventReceive(info->src_addr, data, len);
+        }
+        const MidiEventHeader* event = reinterpret_cast<const MidiEventHeader*>(data);
+        handleFloodCandidate(info->src_addr, event->seq, 0, data, len, false);
+      }
+      break;
+
     case ESPNOW_MSG_MESH_RELAY: {
       // v2.2 controlled flooding (#t-024). New type, never a trailer on 0x03 -- see the
       // #t-020 note "Why a trailer on 0x03 is the wrong spelling": a v1.2 slave ignores an
       // unknown type outright, where a trailer it would have ACTED on, origin-lock and all.
-      if (len < static_cast<int>(sizeof(MeshRelayHeader) + MEDIA_SYNC_MIN_LEN)) {
-        break;  // too short to be a real relay frame -- malformed or truncated, drop silently
+      if (len < static_cast<int>(sizeof(MeshRelayHeader)) + 1) {
+        break;  // no inner packet at all -- malformed or truncated, drop silently
       }
       const MeshRelayHeader* header = reinterpret_cast<const MeshRelayHeader*>(data);
       const uint8_t* inner = data + sizeof(MeshRelayHeader);
       int innerLen = len - static_cast<int>(sizeof(MeshRelayHeader));
 
-      if (receiverModeEnabled && !senderModeEnabled) {
-        // Relayed path: the envelope's origin, never info->src_addr (that is the relayer's
-        // MAC, not the master's) -- see OriginLock's comment, nowde_config.h.
-        processMediaSyncPacket(header->origin, inner, innerLen);
+      // v2.3 (#t-037): dispatch on the INNER type. Until v2.2 every inner packet went to the
+      // MediaSync parser, so a node subscribed to `*` would have read a relayed 0x04 frame as a
+      // MediaSync from its master, byte 17 of the frame's layer as the media index
+      // (docs/PROTOCOL.md "Relaying a 0x04 frame", change 1). A type this build does not play is
+      // neither consumed nor relayed.
+      switch (inner[0]) {
+        case ESPNOW_MSG_MEDIA_SYNC:
+          if (innerLen < MEDIA_SYNC_MIN_LEN) {
+            break;  // too short to be a real relayed MediaSync -- drop silently
+          }
+          if (receiverModeEnabled && !senderModeEnabled) {
+            // Relayed path: the envelope's origin, never info->src_addr (that is the relayer's
+            // MAC, not the master's) -- see OriginLock's comment, nowde_config.h.
+            processMediaSyncPacket(header->origin, inner, innerLen);
+          }
+          handleFloodCandidate(header->origin, header->seq, header->hop, inner, innerLen, true);
+          break;
+
+        case ESPNOW_MSG_MIDI_EVENT:
+          if (!midiEventFrameComplete(inner, innerLen)) {
+            break;  // truncated or malformed (validation steps 1-2) -- not worth forwarding
+          }
+          if (receiverModeEnabled && !senderModeEnabled) {
+            midiEventReceive(header->origin, inner, innerLen);   // the envelope's origin
+          }
+          handleFloodCandidate(header->origin, header->seq, header->hop, inner, innerLen, true);
+          break;
+
+        default:
+          break;
       }
-      handleFloodCandidate(header->origin, header->seq, header->hop, inner, innerLen, true);
       break;
     }
 

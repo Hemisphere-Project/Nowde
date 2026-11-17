@@ -61,7 +61,7 @@ struct DelayedMediaSyncPacket {
 #define MAX_DELAYED_PACKETS 20
 extern DelayedMediaSyncPacket delayedPackets[MAX_DELAYED_PACKETS];
 
-// v2.2 controlled flooding (#t-024): last (origin, seq) already forwarded, scheduled or
+// v2.2 controlled flooding (#t-024): the (origin, type, seq) already forwarded, scheduled or
 // suppressed, per master this node has ever relayed for (see RelayOriginEntry, nowde_config.h).
 extern RelayOriginEntry relayOrigins[MAX_RELAY_ORIGINS];
 
@@ -73,9 +73,10 @@ struct PendingRelay {
   bool active = false;
   unsigned long sendTime = 0;
   uint8_t origin[6] = {0};
+  uint8_t type = 0;                                 // inner packet type: dedup key is (origin, type, seq)
   uint16_t seq = 0;
   uint8_t hop = 0;                                  // hop to STAMP on the outgoing envelope
-  uint8_t payload[sizeof(MediaSyncPacket)] = {0};
+  uint8_t payload[MESH_RELAY_PAYLOAD_MAX] = {0};
   uint8_t payloadLen = 0;
 };
 extern PendingRelay pendingRelays[MAX_PENDING_RELAYS];

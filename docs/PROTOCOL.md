@@ -324,6 +324,8 @@ a `0x04` frame in `0x05`:
    the 90 ms lead, below the 200 ms `CLOCK_DESYNC_THRESHOLD_MS` at which the mesh clock stops
    being trusted at all. It is slave-side policy, not a wire field: #t-039 set the lead and
    left this unchanged, and it moves with the lead if the lead ever does.
+   *(#t-038)* Rules 3–4 schedule on a **trusted** clock only. A frame whose clock this node
+   does not trust plays on arrival and nothing in it is stale — see *The schedule* below.
 5. Re-emit on the record's original channel (a slave-side remap is configuration, never wire).
 
 **Where the scheduler has to live.** `ESPNOW_Task` runs on a **10 ms** period, which is coarser
@@ -331,6 +333,48 @@ than the accuracy this frame exists to deliver — a chord scheduled there lands
 tick jitter and `fireAt` buys nothing. The due-record check belongs on **`MIDI_Task`'s 1 ms
 tick**, which is also the only context allowed to write TinyUSB (see *one writer, one active
 IN endpoint*). Relayed events reach the host through `usbOutMidi()` like everything else.
+
+#### The schedule *(#t-038)*
+
+What the slave does between a record's arrival and its fire time. All of it is slave-side
+policy: none of it is on the wire, and a master never sees it.
+
+- **Two contexts, one queue.** The ESP-NOW receive callback (WiFi task) runs rules 1–4 and
+  hands each surviving record, with the mesh time it fires at, to `MIDI_Task` through a
+  FreeRTOS queue (`MIDI_EVENT_HANDOFF_DEPTH`, two full frames). `MIDI_Task` owns the schedule
+  outright, no lock, and on every 1 ms tick — *before* the USB pump, so a due record leaves in
+  the same tick — takes what was handed over and fires everything due. A hand-off found full
+  means `MIDI_Task` is starved; that record plays on arrival rather than being lost.
+- **Fire order is time order, and stable.** Records due the same millisecond leave in the
+  order they arrived, which is the order the master captured them: a chord stays together,
+  and a Note Off followed by a Note On on one key stays a retrigger instead of becoming a
+  silent key. Times compare as `(int32_t)` differences, so the 2^32 ms wrap is harmless.
+- **Depth: 266 records, derived.** `MIDI_EVENT_SCHED_DEPTH = (lead ÷ batch + 1) × 14` — every
+  record the frame cap can carry across one lead plus one batch window, `(90 ÷ 5 + 1) × 14`,
+  2.1 KB. The frame caps bound a frame and never the stream (see *Carry-over*), so the depth
+  is sized off the cap's rate, not off one frame.
+- **Full: the earliest fires early, nothing is dropped.** A record arriving at a full schedule
+  makes the earliest held record — or itself, if it is due sooner — fire at once. Precision is
+  lost, the event never is, and what is held still leaves in time order. Logged once a second.
+- **The clock check, once per frame.** The frame does not carry its mint time, but it states
+  it: `fireAt − lead` for a frame with new records, `fireAt` itself for a pure carry-over or a
+  `SNAPSHOT`. When that differs from this node's `meshMillis()` by more than
+  `CLOCK_DESYNC_THRESHOLD_MS` (200 ms, the threshold MediaSync uses, transit included as it is
+  there) the mesh clock is not trusted for this frame: its records **play on arrival**, as
+  #t-037 played every record, and **none is stale** — lateness measured on a clock that is
+  itself in doubt says nothing about the record. This is MediaSync's rule 2 for the same
+  reason: without it, a node 300 ms ahead of its master would drop every event as stale, and a
+  node stranded 69 s behind (the 2026-09-07 failure) would hold every event for 69 s. Logged
+  once a second as `COARSE`. The estimate uses this node's own `MIDI_EVENT_LEAD_MS`; a master
+  built on another lead moves it by the difference, well inside 200 ms.
+- **A `SNAPSHOT` yields to the stream.** Snapshot records still play at once — except for a
+  controller with a scheduled record still waiting: the master sends a snapshot only after its
+  live events are out, so that waiting record is the newer value of the two, and playing the
+  snapshot first would jump the controller ahead by the lead, then back.
+
+`tools/midi_schedule_test.cpp` runs the schedule (`src/midi_schedule.h`) on the host, under
+`tools/selftest.py`: order, stability, the wrap, the full case, the clock check at 300 ms ahead
+and 69 s behind, and the stale boundary.
 
 #### `groupMask`, and the assumption v2.3 ships instead of a decision
 
@@ -352,7 +396,10 @@ A periodic (≈1 Hz) full CC state dump for the layer, so a node that joined aft
 carry-over window closed converges instead of waiting for the next change. Records are applied
 as **current state, immediately** — `offset` is 0 and nothing is scheduled — and a snapshot
 carries controller messages only: replaying a Note On from a snapshot would retrigger it.
-Built by #t-038; the bit is frozen here so the frame does not have to change to gain it.
+Built by #t-037 with the frame (the master walks its CC table about once a second,
+≤ 14 records per frame, one batch window apart; a slave plays each controller record at once);
+the bit is frozen here so the frame does not have to change to gain it. *(#t-038)* At once,
+unless that controller has a scheduled record still waiting — see *The schedule*.
 
 #### Frame `seq` and record `evSeq` are two counters, on purpose
 
@@ -380,9 +427,11 @@ lets v2.3 masters share a mesh with fielded slaves.
   gets a full timecode 30 times a second. Hours wrap at 24.
 - *(v2)* **MTC full-frame** `F0 7F 7F 01 01 hh mm ss ff F7` on start and on position jumps > 1 s (loop wrap, seek).
 - *(v2)* **MIDI Start** (`FA`) on stopped → playing, **Stop** (`FC`) on playing → stopped.
-- *(v2.3, not yet implemented)* Relayed **channel-voice messages** from the master host —
+- *(v2.3)* Relayed **channel-voice messages** from the master host —
   Note, CC, Program Change, Channel Pressure, Pitch Bend — on their original channel, emitted
-  at their scheduled mesh time and never earlier. The transport is
+  at their scheduled mesh time, in the order the master's host sent them. Earlier only in the
+  two degraded cases [*The schedule*](#the-schedule-t-038) names — a full schedule, a mesh
+  clock this node does not trust — where a late or early event beats a lost one. The transport is
   [the `0x04` event frame](#the-v23-event-frame-0x04). A host sees ordinary MIDI: there is no
   new message for it to learn, and **nothing above changes** — `CC#100` and MTC keep their
   meaning and their cadence, so a player written against the v1.2 contract is not touched by
