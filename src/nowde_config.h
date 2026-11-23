@@ -95,9 +95,11 @@
   #define NOWDE_WIFI_LR 0
 #endif
 // 250K trades throughput we do not need for the most link budget; 500K is the milder step.
-#ifndef NOWDE_LR_RATE
-  #define NOWDE_LR_RATE WIFI_PHY_RATE_LORA_250K
-#endif
+// 2.4: the rate is part of the stored switch, no longer a build constant: SET_LR / HELLO `lr`
+// read 0 off, 1 LR 250k (what 2.0.3's `on` meant, so a stored 1 keeps its meaning), 2 LR 500k.
+#define NOWDE_LR_OFF  0
+#define NOWDE_LR_250K 1
+#define NOWDE_LR_500K 2
 // v2.2: MEDIA_SYNC is ONE broadcast frame, always. It used to be one unicast per slave,
 // pre-filtered by the master's receiver table, then (2.0.3) a build flag. Receivers already
 // filter on the packet's layer, so this needs no receiver change -- measured on the bench
@@ -241,7 +243,8 @@
 #define SYSEX_CMD_SET_ROLE 0x08          // v2: F0 7D 08 role F7 (0 slave, 1 master, 7F auto)
 #define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
 #define SYSEX_CMD_SET_LOG 0x0A           // v2: F0 7D 0A on(1) F7 — stream the node log as LOG frames
-#define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B on(0/1) F7 — store the LR switch in NVS, HELLO, restart
+#define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B mode F7 — store the LR switch in NVS, HELLO, restart
+                                         // 2.4: mode 0 off, 1 LR 250k, 2 LR 500k (NOWDE_LR_*)
 #define SYSEX_CMD_OTA_DATA_ACKED 0x0C    // 2.0.3: F0 7D 0C seq(7-bit) len(raw bytes) [data 7-bit] F7 — written only if
                                          // the decoded length matches, answered by OTA_ACK seq status (stop-and-wait)
 #define SYSEX_CMD_SET_LOSS_POLICY 0x0D   // v2.2: F0 7D 0D stop(0/1) F7 — freewheel vs stop on link loss, NVS, live
@@ -261,6 +264,14 @@
 // the same suffix as the USB name "Nowde - XXXXXX", so a host keys a node without its port name.
 #define NOWDE_HELLO_GEN 2
 #define NOWDE_NODE_ID_LEN 6
+// 2.4: RSSI older than this reads as unknown (0): the master's 5 s "missing" mark.
+#define NOWDE_RSSI_STALE_MS 5000
+// 2.4 bench-only (#t-040's relay check on a desk): SET_NEIGHBOURS F0 7D 70 [n x MAC, 7-bit
+// packed] F7. Builds with -DNOWDE_BENCH_NEIGHBOURS drop every ESP-NOW frame (MCK included)
+// from a MAC not listed, before dispatch; an empty list accepts all; RAM only. Every other
+// build answers ERROR_REPORT 02, so a release unit can never be talked into a mask.
+#define SYSEX_CMD_SET_NEIGHBOURS 0x70
+#define NOWDE_MAX_NEIGHBOURS 8
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23
@@ -326,11 +337,14 @@ struct ReceiverInfo {
   uint16_t syncGaps;    // v2.2 trailer: MEDIA_SYNC frames this slave never received, counted
                         // from gaps in the master's `seq`. Broadcast has no MAC ACK, so this
                         // IS the silent-slave detector `espnowTxFail` used to be. Saturates.
+  int8_t rssi;          // 2.4 trailer: dBm of the last frame this slave heard straight from its
+                        // locked master; 0 = unknown (none heard for 5 s, or never).
 } __attribute__((packed));
 // Wire-compat: every field above is appended, so each generation has its own floor and a
 // shorter packet is read for what it carries (see handleReceiverInfo) rather than dropped.
 #define RECEIVER_INFO_MIN_LEN     ((int)offsetof(ReceiverInfo, syncQuality))  // pre-2.0.1
 #define RECEIVER_INFO_QUALITY_LEN ((int)offsetof(ReceiverInfo, syncGaps))     // 2.0.1..2.0.3
+#define RECEIVER_INFO_GAPS_LEN    ((int)offsetof(ReceiverInfo, rssi))         // v2.2..2.3
 
 struct MediaSyncPacket {
   uint8_t type = ESPNOW_MSG_MEDIA_SYNC;
@@ -483,6 +497,7 @@ struct ReceiverEntry {
   uint8_t mediaIndex;   // Current playing media index (0 = stopped)
   uint8_t syncQuality = NOWDE_SYNC_UNKNOWN;  // 2.0.1: last reported by the slave (NOWDE_SYNC_*)
   uint16_t syncGaps = 0;                     // v2.2: MEDIA_SYNC frames this slave says it missed
+  int8_t rssi = 0;                           // 2.4: dBm the slave reports for its master (0 unknown)
 };
 
 // v2.2 ORIGIN LOCK (slave side). Which master this node follows, and when it was last heard.

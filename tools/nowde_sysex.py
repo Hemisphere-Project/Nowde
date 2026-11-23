@@ -14,6 +14,7 @@ CMD_OTA_END = 0x07
 CMD_SET_ROLE = 0x08
 CMD_SET_LOCAL_LAYER = 0x09
 CMD_SET_LOG = 0x0A
+CMD_SET_LR = 0x0B
 CMD_OTA_DATA_ACKED = 0x0C
 CMD_SET_LOSS_POLICY = 0x0D
 CMD_SET_ORIGIN = 0x0E
@@ -25,9 +26,28 @@ CMD_RUNNING_STATE = 0x22
 CMD_OTA_ACK = 0x23
 CMD_ERROR_REPORT = 0x30
 CMD_LOG = 0x31
+CMD_SET_NEIGHBOURS = 0x70   # 2.4 bench-only builds (-DNOWDE_BENCH_NEIGHBOURS)
 
 CMD_NAMES = {v: k[4:] for k, v in globals().items() if k.startswith('CMD_')}
 ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 0x7F: 'auto'}
+LR_MODES = {'off': 0, '250k': 1, '500k': 2}          # 2.4: SET_LR / HELLO `lr` (2.0.3: 0/1)
+LR_NAMES = {v: k for k, v in LR_MODES.items()}
+
+
+def set_lr(mode):
+    """2.4: 'off' | '250k' | '500k' (or 0/1/2). The node stores it and restarts."""
+    code = LR_MODES[mode] if isinstance(mode, str) else int(mode)
+    assert code in LR_NAMES
+    return [MANUFACTURER, CMD_SET_LR, code]
+
+
+def set_neighbours(macs=()):
+    """2.4 bench-only: the MACs a meshmask node may hear (bytes or 'AA:BB:..'); () = everyone."""
+    raw = []
+    for m in macs:
+        raw += list(bytes.fromhex(m.replace(':', ''))) if isinstance(m, str) else list(m)
+    assert len(raw) % 6 == 0 and len(raw) <= 48
+    return [MANUFACTURER, CMD_SET_NEIGHBOURS] + encode7(raw)
 BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite'}
 ERROR_NAMES = {0x01: 'CONFIG_INVALID', 0x02: 'SYSEX_PARSE_ERROR', 0x03: 'ESPNOW_SEND_FAILED',
                0x04: 'MESH_CLOCK_LOST_SYNC', 0x05: 'RECEIVER_TIMEOUT', 0xFF: 'UNKNOWN'}
@@ -195,7 +215,7 @@ def ota_ack(seq, status, duplicates=None):
 # ---- node -> host -----------------------------------------------------------------
 
 def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
-          lr=None, link=None, sync_gaps=None, build_id=None, gen=None, node_id=None):
+          lr=None, link=None, sync_gaps=None, build_id=None, gen=None, node_id=None, rssi=None):
     """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
     needs the ones before it: sync_quality (2.0.1), lr (2.0.3), link (2.0.5: a
     (link_lost, ms_since_sync, watchdog_restarts) tuple), sync_gaps (v2.2, 14-bit),
@@ -208,7 +228,7 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
         if sync_quality is not None:
             out += [int(sync_quality) & 0x7F]
             if lr is not None:
-                out += [1 if lr else 0]
+                out += [lr & 0x7F if isinstance(lr, int) and not isinstance(lr, bool) else (1 if lr else 0)]
                 if link is not None:
                     lost, since, wd = link
                     s = max(0, min(0x3FFF, int(since)))
@@ -222,6 +242,8 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
                             if gen is not None:
                                 nid = str(node_id or '').upper().encode('ascii')[:NODE_ID_LEN]
                                 out += [int(gen) & 0x7F] + list(nid.ljust(NODE_ID_LEN, b'0'))
+                                if rssi is not None:   # 2.4: dBm (negative) or 0 unknown, sent as -dBm
+                                    out += [(-int(rssi)) & 0x7F]
     return out
 
 
@@ -258,6 +280,8 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True, alone=None):
                    + u32be(int(r.get('last_seen_ms', 0)))
                    + [1, int(r.get('index', 0)) & 0x7F, int(r.get('sync_quality', 2)) & 0x7F,
                       (gaps >> 8) & 0xFF, gaps & 0xFF])
+            if 'rssi' in r:   # 2.4 tail: the slave's dBm for its master, as -dBm (0 unknown)
+                raw += [(-int(r['rssi'] or 0)) & 0x7F]
             d += [1] + encode7(raw)
         else:
             d += [0]
@@ -294,6 +318,7 @@ def parse(data):
             info['sync_quality'] = d[18]   # 2.0.1: NOWDE_SYNC_* (0 none, 1 coarse, 2 locked)
         if len(d) >= 20:
             info['lr'] = bool(d[19])       # 2.0.3: the long-range PHY switch as this node runs it
+            info['lr_mode'] = LR_NAMES.get(d[19], 'mode-%d' % d[19])   # 2.4: off / 250k / 500k
         if len(d) >= 24:                   # 2.0.5: the receive link as this node sees it
             info['link_lost'] = bool(d[20])
             info['ms_since_sync'] = (d[21] << 7) | d[22]   # 0x3FFF = >= 16.4 s, or never
@@ -305,6 +330,8 @@ def parse(data):
         if len(d) >= 43:                   # 2.4: protocol generation + node id (the USB name's suffix)
             info['gen'] = d[36]
             info['node_id'] = bytes(d[37:43]).decode('ascii', 'replace')
+        if len(d) >= 44:                   # 2.4: dBm of the locked master here; None = unknown
+            info['rssi'] = -d[43] if d[43] else None
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}
@@ -323,8 +350,10 @@ def parse(data):
         info = {'uptime_ms': from_u32be(decode7(d[0:5])), 'synced': bool(d[5]), 'total': d[6],
                 'chunk': d[7], 'chunks': d[8], 'receivers': []}
         idx = 10
-        for _ in range(d[9]):
-            r = decode7(d[idx:idx + 45])   # v2.2: 39 raw -> 45 encoded (2.0.1 was 37 -> 43)
+        for k in range(d[9]):
+            # v2.2: 39 raw -> 45 encoded (2.0.1 was 37 -> 43); 2.4: 40 -> 46. The record is the
+            # chunk's tail (one per chunk), so the last one is read to the end, whatever it grew to.
+            r = decode7(d[idx:] if k == d[9] - 1 else d[idx:idx + 45])
             idx += 45
             if len(r) < 36:
                 break
@@ -334,7 +363,8 @@ def parse(data):
                 'version': bytes(r[22:30]).decode('ascii', 'ignore').rstrip('\x00'),
                 'last_seen_ms': from_u32be(r[30:34]), 'index': r[35],
                 'sync_quality': r[36] if len(r) >= 37 else 0xFF,     # 2.0.1
-                'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0})   # v2.2
+                'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0,    # v2.2
+                'rssi': (-r[39] if r[39] else None) if len(r) >= 40 else None})   # 2.4
         if d[9] == 0 and len(d) >= 11:
             info['alone'] = bool(d[10])   # v2.1, empty-table chunk only: no peer heard since boot
         return name, info

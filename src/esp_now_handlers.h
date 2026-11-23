@@ -13,11 +13,12 @@
 // inline on purpose: main.cpp keeps its file-local helpers in an anonymous namespace, so a
 // definition living there would have internal linkage and never reach sender_mode.cpp.
 extern bool lrEnabled;
+extern uint8_t lrMode;
 inline void nowdeApplyPeerRate(const uint8_t* peer) {
   if (!lrEnabled) return;
   esp_now_rate_config_t rc = {};
   rc.phymode = WIFI_PHY_MODE_LR;
-  rc.rate = NOWDE_LR_RATE;
+  rc.rate = lrMode == NOWDE_LR_500K ? WIFI_PHY_RATE_LORA_500K : WIFI_PHY_RATE_LORA_250K;
   rc.ersu = false;
   rc.dcm = false;
   esp_err_t r = esp_now_set_peer_rate_config(peer, &rc);
@@ -40,3 +41,10 @@ esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len);
 
 void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status);
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len);
+
+#ifdef NOWDE_BENCH_NEIGHBOURS
+// 2.4 bench-only neighbour mask (SET_NEIGHBOURS, sysex.cpp): onDataRecv drops frames from MACs
+// not listed. Defined in esp_now_handlers.cpp.
+extern uint8_t benchNeighbours[NOWDE_MAX_NEIGHBOURS][6];
+extern uint8_t benchNeighbourCount;
+#endif

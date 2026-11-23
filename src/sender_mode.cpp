@@ -144,8 +144,10 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
                                 ? recvInfo->syncQuality : NOWDE_SYNC_UNKNOWN;
   // v2.2 trailer: frames the slave says it missed. A pre-v2.2 slave does not send it, and 0 is
   // the honest reading there -- it is a node that cannot report loss, not a node with none.
-  const uint16_t rxSyncGaps = (len >= static_cast<int>(sizeof(ReceiverInfo)))
+  const uint16_t rxSyncGaps = (len >= RECEIVER_INFO_GAPS_LEN)
                               ? recvInfo->syncGaps : 0;
+  // 2.4 trailer: the slave's RSSI for its master; a 2.3 slave does not send it (0 = unknown).
+  const int8_t rxRssi = (len >= static_cast<int>(sizeof(ReceiverInfo))) ? recvInfo->rssi : 0;
 
   bool found = false;
   int freeSlot = -1;
@@ -159,6 +161,7 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
       receiverTable[i].mediaIndex = recvInfo->mediaIndex;
       receiverTable[i].syncQuality = rxSyncQuality;
       receiverTable[i].syncGaps = rxSyncGaps;
+      receiverTable[i].rssi = rxRssi;
 
       // Only log on RECONNECTION (was disconnected, now connected again)
       if (!receiverTable[i].connected) {
@@ -220,6 +223,7 @@ void handleReceiverInfo(const esp_now_recv_info_t* info, const uint8_t* data, in
     receiverTable[freeSlot].mediaIndex = recvInfo->mediaIndex;  // Initialize media index
     receiverTable[freeSlot].syncQuality = rxSyncQuality;        // 2.0.1: reported lock quality
     receiverTable[freeSlot].syncGaps = rxSyncGaps;              // v2.2: frames it says it missed
+    receiverTable[freeSlot].rssi = rxRssi;                      // 2.4: its RSSI for this master
     changed = true;
 
     esp_now_peer_info_t peerInfo = {};

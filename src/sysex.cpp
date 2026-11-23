@@ -661,15 +661,40 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_NEIGHBOURS:
+      // 2.4 bench-only -- Format: F0 7D 70 [n x MAC(6), 7-bit packed] F7 ; n = 0 accepts all.
+      // RAM only: a power cycle forgets it. Release builds refuse it (ERROR_REPORT 02).
+#ifdef NOWDE_BENCH_NEIGHBOURS
+      {
+        uint8_t macs[NOWDE_MAX_NEIGHBOURS * 6 + 8] = {0};
+        int enc = length - 4;
+        int maxEnc = ((NOWDE_MAX_NEIGHBOURS * 6) / 7) * 8 + 8;
+        int n = (enc > 0 && enc <= maxEnc) ? decode7bit(&data[3], enc, macs) / 6 : 0;
+        if (enc < 0 || enc > maxEnc || n > NOWDE_MAX_NEIGHBOURS) {
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+          break;
+        }
+        for (int i = 0; i < n; i++) memcpy(benchNeighbours[i], &macs[i * 6], 6);
+        benchNeighbourCount = (uint8_t)n;
+        DEBUG_SERIAL.printf("[BENCH] neighbour mask: %d MAC(s)%s\r\n", n, n ? "" : " (accept all)");
+        sendHello();
+      }
+#else
+      sendErrorReport(ERROR_SYSEX_PARSE_ERROR, &data[2], 1);
+#endif
+      break;
+
     case SYSEX_CMD_SET_LR:
       // 2.0.3 — Format: F0 7D 0B [on: 0/1] F7 ; long-range PHY switch. Stored in NVS, then the node
       // restarts to apply it (the protocol is set at init, before the channel). All-or-nothing
       // across the mesh: a node left on the other setting is invisible, not degraded.
-      if (length >= 5 && (data[3] == 0 || data[3] == 1)) {
-        bool on = data[3] == 1;
-        saveLrToEEPROM(on);
-        lrEnabled = on;
-        DEBUG_SERIAL.printf("[SET_LR] %s -> restarting\r\n", on ? "ON" : "OFF");
+      // 2.4: mode 0 off, 1 LR 250k, 2 LR 500k (a 2.0.3 host's 0/1 means what it meant).
+      if (length >= 5 && data[3] <= NOWDE_LR_500K) {
+        lrMode = data[3];
+        lrEnabled = lrMode != NOWDE_LR_OFF;
+        saveLrToEEPROM(lrMode);
+        DEBUG_SERIAL.printf("[SET_LR] %s -> restarting\r\n",
+                            lrMode == NOWDE_LR_500K ? "500k" : lrEnabled ? "250k" : "OFF");
         sendHello();               // the HELLO trailer already carries the new value
         delay(300);
         esp_restart();
@@ -803,7 +828,7 @@ void sendHello() {
   message[msgIdx++] = nodeSyncQuality() & 0x7F;
   // 2.0.3 trailer: the LR switch as this node runs it, so a fleet check reads the PHY mode of
   // every node from its host without opening a box (parsers before 2.0.3 ignore the byte).
-  message[msgIdx++] = lrEnabled ? 1 : 0;
+  message[msgIdx++] = lrMode & 0x7F;   // 2.4: 0 off, 1 250k, 2 500k (old readers: nonzero = on)
   // 2.0.5 trailer: the receive link as this node sees it -- linkLost (0/1), milliseconds since the
   // last accepted MEDIA_SYNC as two 7-bit bytes (hi, lo; capped at 0x3FFF = 16.4 s, also 0x3FFF
   // when none ever came), and the radio watchdog's restart count since power-on (0..127). Hosts
@@ -839,6 +864,9 @@ void sendHello() {
     snprintf(nodeId, sizeof(nodeId), "%02X%02X%02X", mac[3], mac[4], mac[5]);
     for (int i = 0; i < NOWDE_NODE_ID_LEN; i++) message[msgIdx++] = (uint8_t)nodeId[i] & 0x7F;
   }
+  // 2.4 trailer (payload 43): -dBm of the last frame straight from the locked master, 0 =
+  // unknown or not a slave. The walk (nowde#t-052) reads link quality from this on a slave.
+  message[msgIdx++] = (uint8_t)(-(int)currentMasterRssi()) & 0x7F;
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
@@ -1079,6 +1107,8 @@ void sendRunningState() {
       // so a rising number here is the only thing that still names a half-deaf node.
       rawData[rawIdx++] = (entry.syncGaps >> 8) & 0xFF;
       rawData[rawIdx++] = entry.syncGaps & 0xFF;
+      // 2.4: what this slave reports for its master, as -dBm (7-bit; 0 = unknown).
+      rawData[rawIdx++] = (uint8_t)(-(int)entry.rssi) & 0x7F;
 
       int encodedLen = encode7bit(rawData, rawIdx, &message[msgIdx]);
       if (msgIdx + encodedLen >= 512) {

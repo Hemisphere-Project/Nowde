@@ -7,8 +7,8 @@ String loadLayerFromEEPROM();
 void saveRoleToEEPROM(uint8_t role);
 uint8_t loadRoleFromEEPROM();
 // 2.0.3: the long-range PHY switch (SET_LR); absent key = the build default NOWDE_WIFI_LR.
-void saveLrToEEPROM(bool on);
-bool loadLrFromEEPROM();
+void saveLrToEEPROM(uint8_t mode);     // 2.4: NOWDE_LR_* (0 off, 1 250k, 2 500k)
+uint8_t loadLrFromEEPROM();
 // v2.2: the link-loss policy (SET_LOSS_POLICY); absent key = the build default
 // NOWDE_STOP_ON_LINK_LOST. true = stop, false = freewheel.
 void saveLossPolicyToEEPROM(bool stop);

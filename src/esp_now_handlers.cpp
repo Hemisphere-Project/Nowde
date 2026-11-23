@@ -40,9 +40,36 @@ void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status) {
   }
 }
 
+#ifdef NOWDE_BENCH_NEIGHBOURS
+// 2.4 bench-only: the MACs this node may hear (SET_NEIGHBOURS); count 0 = everyone.
+uint8_t benchNeighbours[NOWDE_MAX_NEIGHBOURS][6] = {};
+uint8_t benchNeighbourCount = 0;
+#endif
+
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (len < 1) {
     return;
+  }
+
+#ifdef NOWDE_BENCH_NEIGHBOURS
+  // Before ANY dispatch, the clock's MCK included: a desk of three nodes in one room plays a
+  // chain (master -> P2 -> P3) only if P3 really cannot hear the master. Bench builds only.
+  if (benchNeighbourCount > 0) {
+    bool listed = false;
+    for (uint8_t i = 0; i < benchNeighbourCount && !listed; i++) {
+      listed = macEqual(benchNeighbours[i], info->src_addr);
+    }
+    if (!listed) {
+      return;
+    }
+  }
+#endif
+
+  // 2.4: RSSI of the last frame heard straight from the locked master (any type, MCK included):
+  // HELLO, ReceiverInfo and so RUNNING_STATE report it. A relayed frame's src is the relay.
+  if (info->rx_ctrl != nullptr && originLock.valid && macEqual(originLock.mac, info->src_addr)) {
+    masterRssi = static_cast<int8_t>(info->rx_ctrl->rssi);
+    masterRssiAt = millis();
   }
 
   if (meshClock.handleReceive(info->src_addr, data, len)) {

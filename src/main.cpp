@@ -395,14 +395,15 @@ void setup() {
   // 2.0.3: LR is a stored switch (SET_LR 0x0B -> NVS -> restart), no longer a build. LR-only
   // PHY must be set after the interface is up and before the channel, and every node on the
   // mesh needs the same setting or it simply will not see the others (all-or-nothing).
-  lrEnabled = loadLrFromEEPROM();
+  lrMode = loadLrFromEEPROM();
+  lrEnabled = lrMode != NOWDE_LR_OFF;
   if (lrEnabled) {
     esp_err_t lrErr = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
     if (lrErr != ESP_OK) DEBUG_SERIAL.printf("[LR] set_protocol FAILED: %s\r\n", esp_err_to_name(lrErr));
   }
   esp_wifi_set_channel(NOWDE_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d%s\r\n", NOWDE_WIFI_CHANNEL,
-                      lrEnabled ? " [LR]" : "");
+                      lrMode == NOWDE_LR_500K ? " [LR 500k]" : lrEnabled ? " [LR 250k]" : "");
   // v2.2: the policy is a stored choice (SET_LOSS_POLICY), so the LIVE value is the one worth
   // printing — printing the build flag here would now be a lie on any node a host has set.
   // Still printed on every boot so it is checkable on site without reading the binary.

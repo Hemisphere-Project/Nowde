@@ -156,6 +156,21 @@ p = nx.parse(h24)[1]
 check(p['gen'] == 2 and p['node_id'] == 'CD83FC' and p['build_id'] == bid and p['version'] == '2.4-rc1',
       f"HELLO 2.4 gen + node_id {p}")
 check('gen' not in nx.parse(hb)[1], "HELLO v2.1 has no gen")
+# 2.4 LR: HELLO lr is the mode (old readers' nonzero = on still holds), and rssi follows node id.
+h4r = nx.hello('2.4-rc1', 1000, 1, 0, 2, 2, 2, (False, 0, 0), 0, bid, gen=2, node_id='26B8F8', rssi=-67)
+p = nx.parse(h4r)[1]
+check(len(h4r) + 2 == 48 and p['lr'] is True and p['lr_mode'] == '500k' and p['rssi'] == -67,
+      f"HELLO 2.4 lr 500k + rssi {p}")
+check(nx.parse(nx.hello('2.4-rc1', 1000, 1, 1, 2, 2, 0, (False, 0, 0), 0, bid, gen=2, node_id='CD83FC', rssi=0))[1]['rssi'] is None,
+      "HELLO rssi 0 = unknown")
+check(nx.set_lr('250k') == [0x7D, 0x0B, 1] and nx.set_lr('500k')[2] == 2 and nx.set_lr(0)[2] == 0, "SET_LR modes")
+sn = nx.set_neighbours(['AA:BB:CC:DD:EE:01', bytes([0x80, 1, 2, 3, 4, 5])])
+check(sn[:2] == [0x7D, 0x70] and nx.decode7(sn[2:])[:12] == [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 1, 0x80, 1, 2, 3, 4, 5]
+      and all(b < 0x80 for b in sn) and nx.set_neighbours() == [0x7D, 0x70], "SET_NEIGHBOURS packs MACs 7-bit")
+rr = nx.running_state_chunks([{'mac': [1, 2, 3, 4, 5, 6], 'layer': 'main', 'version': '2.4-rc1',
+                               'last_seen_ms': 10, 'index': 3, 'sync_gaps': 7, 'rssi': -71}], 5000, True)[0]
+q = nx.parse(rr)[1]['receivers'][0]
+check(q['rssi'] == -71 and q['sync_gaps'] == 7 and q['version'] == '2.4-rc1', f"RUNNING_STATE 2.4 record rssi {q}")
 
 ea = nx.running_state_chunks([], 1000, False, alone=True)[0]
 check(len(ea) + 2 == 15, f"RUNNING_STATE empty chunk + alone is 15 bytes ({len(ea) + 2})")   # MillluBridge floor is 14
