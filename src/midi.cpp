@@ -133,6 +133,7 @@ void midiProcess() {
 
   midiEventFire();   // v2.3 0x04 (#t-038): scheduled records whose mesh time has come
   usbOutPump();      // MIDI task: everything queued for the host goes out here
+  otaRestartPoll();  // 2.4: a validated OTA_END restarts here, after its verdict went out above
 
   while (midiReadPacket(&packet)) {
     if (!hostLinked()) {

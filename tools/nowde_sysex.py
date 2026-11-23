@@ -14,6 +14,7 @@ CMD_OTA_END = 0x07
 CMD_SET_ROLE = 0x08
 CMD_SET_LOCAL_LAYER = 0x09
 CMD_SET_LOG = 0x0A
+CMD_OTA_DATA_ACKED = 0x0C
 CMD_SET_LOSS_POLICY = 0x0D
 CMD_SET_ORIGIN = 0x0E
 CMD_MEDIA_SYNC = 0x10
@@ -21,6 +22,7 @@ CMD_CHANGE_RECEIVER_LAYER = 0x11
 CMD_HELLO = 0x20
 CMD_CONFIG_STATE = 0x21
 CMD_RUNNING_STATE = 0x22
+CMD_OTA_ACK = 0x23
 CMD_ERROR_REPORT = 0x30
 CMD_LOG = 0x31
 
@@ -29,6 +31,10 @@ ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 0x7F: 'auto'}
 BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite'}
 ERROR_NAMES = {0x01: 'CONFIG_INVALID', 0x02: 'SYSEX_PARSE_ERROR', 0x03: 'ESPNOW_SEND_FAILED',
                0x04: 'MESH_CLOCK_LOST_SYNC', 0x05: 'RECEIVER_TIMEOUT', 0xFF: 'UNKNOWN'}
+# 2.4 (#t-046): OTA_END's verdict rides OTA_ACK with seq 0x7F (src/nowde_config.h).
+OTA_ACK_SEQ_END = 0x7F
+OTA_CHUNK_STATUS = {0: 'ok', 1: 'bad-length', 2: 'write-failed', 3: 'no-session'}
+OTA_END_STATUS = {3: 'no-session', 4: 'validated', 5: 'size-mismatch', 6: 'invalid'}
 RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT', 7: 'WDT',
                  8: 'DEEPSLEEP', 9: 'BROWNOUT', 10: 'SDIO', 11: 'USB', 12: 'JTAG',
                  13: 'EFUSE', 14: 'PWR_GLITCH', 15: 'CPU_LOCKUP'}
@@ -167,6 +173,22 @@ def ota_data(chunk):
 
 def ota_end():
     return [MANUFACTURER, CMD_OTA_END]
+
+
+def ota_data_acked(seq, chunk):
+    """2.0.3 stop-and-wait chunk: seq 0..127, raw length 1..100, then the 7-bit data."""
+    chunk = list(chunk)
+    assert 0 < len(chunk) <= 100
+    return [MANUFACTURER, CMD_OTA_DATA_ACKED, seq & 0x7F, len(chunk)] + encode7(chunk)
+
+
+def ota_ack(seq, status, duplicates=None):
+    """Node -> host. A chunk ack (6 bytes on the wire), or with `duplicates` the 2.4 END verdict."""
+    out = [MANUFACTURER, CMD_OTA_ACK, seq & 0x7F, status & 0x7F]
+    if duplicates is not None:
+        d = min(duplicates, 0x3FFF)
+        out += [(d >> 7) & 0x7F, d & 0x7F]
+    return out
 
 
 # ---- node -> host -----------------------------------------------------------------
@@ -308,6 +330,15 @@ def parse(data):
         if d[9] == 0 and len(d) >= 11:
             info['alone'] = bool(d[10])   # v2.1, empty-table chunk only: no peer heard since boot
         return name, info
+    if cmd == CMD_OTA_DATA_ACKED and len(d) >= 2:
+        return name, {'seq': d[0], 'len': d[1], 'data': decode7(d[2:])}
+    if cmd == CMD_OTA_ACK and len(d) >= 2:
+        if d[0] == OTA_ACK_SEQ_END and len(d) >= 4:   # 2.4: OTA_END's verdict
+            return name, {'end': True, 'status': d[1],
+                          'verdict': OTA_END_STATUS.get(d[1], 'status-%d' % d[1]),
+                          'duplicates': (d[2] << 7) | d[3]}
+        return name, {'end': False, 'seq': d[0], 'status': d[1],
+                      'verdict': OTA_CHUNK_STATUS.get(d[1], 'status-%d' % d[1])}
     if cmd == CMD_LOG:
         return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}
     if cmd == CMD_ERROR_REPORT and len(d) >= 2:

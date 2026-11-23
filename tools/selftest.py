@@ -66,6 +66,22 @@ rq = nx.running_state_chunks([{'mac': [1, 2, 3, 4, 5, 6], 'layer': 'main', 'vers
 check(nx.parse(rq[0])[1]['receivers'][0]['sync_quality'] == 2, f"RUNNING_STATE sync_quality {nx.parse(rq[0])[1]}")
 
 check(nx.parse(nx.ota_begin(123456))[0] == 'OTA_BEGIN', "OTA_BEGIN")
+
+# 2.4 (#t-046) — the acked OTA path and OTA_END's verdict. Byte layouts per PROTOCOL.md 0x0C / 0x23
+# and src/sysex.cpp (the chunk ack is 6 bytes on the wire, the END verdict 8).
+ch = bytes(range(100))
+oda = nx.ota_data_acked(5, ch)
+check(oda[:4] == [0x7D, 0x0C, 5, 100] and nx.parse(oda)[1] == {'seq': 5, 'len': 100, 'data': list(ch)}, "OTA_DATA_ACKED layout")
+check(all(b < 0x80 for b in oda), "OTA_DATA_ACKED 7-bit safe")
+ca = nx.ota_ack(5, 0)
+check(len(ca) + 2 == 6 and nx.parse(ca)[1] == {'end': False, 'seq': 5, 'status': 0, 'verdict': 'ok'}, "OTA_ACK chunk")
+check(nx.parse(nx.ota_ack(127, 1))[1]['end'] is False, "a 6-byte ack on seq 127 is still a chunk ack")
+ev = nx.ota_ack(nx.OTA_ACK_SEQ_END, 4, duplicates=200)
+check(len(ev) + 2 == 8 and ev[4:] == [200 >> 7, 200 & 0x7F], f"OTA_END verdict layout {ev}")
+check(nx.parse(ev)[1] == {'end': True, 'status': 4, 'verdict': 'validated', 'duplicates': 200}, "OTA_END verdict parse")
+for st, v in ((3, 'no-session'), (5, 'size-mismatch'), (6, 'invalid')):
+    check(nx.parse(nx.ota_ack(0x7F, st, duplicates=0))[1]['verdict'] == v, f"OTA_END verdict {v}")
+check(nx.parse(nx.ota_ack(0x7F, 4, duplicates=99999))[1]['duplicates'] == 0x3FFF, "OTA_END dups saturate at 14 bits")
 check(nx.parse(nx.set_role('auto'))[1] == {'role': 'auto'}, "SET_ROLE")
 
 # v2.2 — the trailers the broadcast half adds, and the two runtime switches.

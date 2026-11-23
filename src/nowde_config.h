@@ -251,6 +251,13 @@
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23
+// 2.4 (#t-046): OTA_END's verdict rides OTA_ACK with this seq: F0 7D 23 7F status dupHi dupLo F7.
+// Chunk acks keep status 0..3 (ok, bad length, write failed, no session).
+#define OTA_ACK_SEQ_END 0x7F
+#define OTA_END_NO_SESSION 3
+#define OTA_END_VALIDATED 4
+#define OTA_END_SIZE_MISMATCH 5
+#define OTA_END_INVALID 6
 #define SYSEX_CMD_ERROR_REPORT 0x30
 #define SYSEX_CMD_LOG 0x31               // v2: F0 7D 31 text(ascii) F7 — one log line, after SET_LOG 1
 
