@@ -455,6 +455,32 @@ within a second while playing). A momentary stall (a `RUNNING_STATE` burst) keep
 `meshMillis()` is read through `meshMillisStable()` (two agreeing reads): the library's
 64-bit offset is slewed by another task and a torn read comes back off by 2^32 µs.
 
+## v2.1 · Generic MIDI in (master, not yet run on a board)
+
+A master node also accepts **plain MIDI** from its host, so a DAW, QLab, Millumin without
+the Bridge, or a keyboard can drive the mesh without speaking `0x7D` SysEx:
+
+| Host sends | Node does |
+|------------|-----------|
+| MTC quarter-frames (`F1 0n`…`F1 7n`) | position = decoded timecode + 2 frames (the 8-piece sequence spans two frames), running = true; 24 / 25 / 29.97 / 30 fps from the rate bits |
+| MTC full-frame `F0 7F 7F 01 01 hh mm ss ff F7` | position jump |
+| `CC#100 = N` (any channel) | media index N; `0` = stop |
+| Start `FA` | position 0, running |
+| Continue `FB` / Stop `FC` | running / stopped |
+| no quarter-frame for 250 ms | stopped (the host paused its MTC) |
+
+The node emits the usual `MediaSyncPacket` stream from that (100 ms running, 1 s idle,
+immediately on any change) through the same v2.2 broadcast as the SysEx path — same `seq`
+counter, `volume`/`flags` = 0 (MIDI in carries no volume) — on **its own layer**
+(`SET_LOCAL_LAYER`; the AtomS3 default `*` addresses every slave — a packet tagged `*`
+matches any subscription on a v2.1 slave; a 2.0.x slave follows it only when itself
+subscribed to `*`). **SysEx keeps
+priority**: for 2 s after any `MEDIA_SYNC` frame, MIDI in is ignored, so a MillluBridge /
+HPlayer2 host is never disturbed by stray MIDI. Other CCs, notes and program changes travel
+in [the v2.3 event frame](#the-v23-event-frame-0x04); `CC#100` does not — it is the media index,
+which every slave already gets inside `MEDIA_SYNC` and plays to its host from there (2.4 rc,
+nowde#t-049: on the frame too, a slave's host would get two `CC#100` streams on their own timing).
+
 ## Firmware tasks
 
 | Task | Core | Priority | Period | Job |

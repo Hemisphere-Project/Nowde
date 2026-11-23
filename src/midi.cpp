@@ -5,6 +5,7 @@
 #include "nowde_state.h"
 #include "sysex.h"
 #include "usb_out.h"
+#include "host_clock.h"
 
 namespace {
 constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
@@ -140,7 +141,27 @@ void midiProcess() {
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
     uint8_t cin = packet.header & 0x0F;
 
+    // v2.1 — plain MIDI from the host (a master's DAW / QLab / keyboard)
+    if (cin == 0x2 && packet.byte1 == 0xF1) {                 // MTC quarter-frame
+      hostClockOnQuarterFrame(packet.byte2);
+      continue;
+    }
+    if ((cin == 0xF || cin == 0x5) && packet.byte1 >= 0xF8) { // single-byte real-time
+      hostClockOnRealtime(packet.byte1);
+      continue;
+    }
     if (cin >= 0x8 && cin <= 0xE) {
+      // A host CC feeds both the v2.1 clock and the v2.3 frame -- except CC#100, the media index:
+      // the slaves already get it inside MEDIA_SYNC and play it to their hosts from there (with
+      // its 1 s repeat and the stop edge), so on the frame too a slave's host would see two CC#100
+      // streams on their own timing, and the frame's 1 Hz snapshot would replay an index the
+      // MEDIA_SYNC path had already stopped. CC#100 stays off the radio.
+      if (cin == 0xB) {
+        hostClockOnControlChange(packet.byte1 & 0x0F, packet.byte2, packet.byte3);
+        if (packet.byte2 == 100) {
+          continue;
+        }
+      }
       midiEventCapture(packet.byte1, packet.byte2, packet.byte3);   // v2.3 0x04 (#t-037): ONE call
       continue;
     }

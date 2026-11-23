@@ -42,6 +42,7 @@
 #include "ui.h"
 #include "usb_out.h"
 #include "watchdog.h"
+#include "host_clock.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -312,6 +313,7 @@ void espnowTask(void* parameter) {
     watchdogTick(now);
 
     meshClock.loop();
+    hostClockTick();   // v2.1: MIDI-in master path
     uiTick();
     vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
   }
