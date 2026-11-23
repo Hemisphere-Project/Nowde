@@ -12,11 +12,19 @@
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.5"
+// 2.4: the rc is spelled `2.4-rc1`, not `2.4.0-rc1`. The version field is 8 bytes on the wire,
+// frozen since v1.2 (HELLO version(8), ReceiverInfo/RUNNING_STATE version[8], the latter
+// NUL-terminated at [7]), so it holds 7 characters: `2.4.0-rc1` would read `2.4.0-r` on a
+// master's slave list. The build id (HELLO [26..35]) is what names the exact image.
+#define NOWDE_VERSION "2.4-rc1"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
-#define MAX_SENDERS 10
-#define MAX_RECEIVERS 10
+// 2.4: 4 + 15, was 10 + 10. Every table entry is an ESP-NOW peer and so is the broadcast
+// address, and ESP-NOW holds 20 unencrypted peers: 10 + 10 + 1 = 21 made the last add fail
+// silently. A room has one master, two during a hand-over (#t-022), so 4 senders is headroom;
+// the receivers are what grows (the garden fleet is 6, a bench desk 3). 4 + 15 + 1 = 20.
+#define MAX_SENDERS 4
+#define MAX_RECEIVERS 15
 #define RECEIVER_TIMEOUT_MS 5000
 #define SENDER_TIMEOUT_MS 5000
 #define RECEIVER_BEACON_INTERVAL_MS 1000
@@ -248,6 +256,11 @@
 // v2.1 HELLO trailer: how many bytes of the app ELF SHA-256 (esp_app_desc_t.app_elf_sha256)
 // HELLO carries as the build identity. 8 bytes = 16 hex, a short sha for a fleet of tens.
 #define NOWDE_BUILD_ID_LEN 8
+// 2.4 HELLO trailer, after the build id: the protocol generation (2 = the 2.x line; Nowde 3
+// sends 3) and the node id, the MAC's last three bytes as 6 upper-case hex ASCII characters --
+// the same suffix as the USB name "Nowde - XXXXXX", so a host keys a node without its port name.
+#define NOWDE_HELLO_GEN 2
+#define NOWDE_NODE_ID_LEN 6
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23
@@ -274,7 +287,7 @@
 #define ESPNOW_MSG_RECEIVER_INFO 0x02
 #define ESPNOW_MSG_MEDIA_SYNC 0x03
 #define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.3: byte layout FROZEN in docs/PROTOCOL.md "The v2.3
-                                         // event frame", not yet implemented (#t-037 builds it).
+                                         // event frame", built by #t-037 (midi_event.cpp).
                                          // 30-byte header + N x 7-byte records, <= 14 new + <= 14
                                          // carried, <= 226 B so it survives the 0x05 envelope.
                                          // Locate record 0 at hdrLen and stride by recLen -- never
@@ -503,6 +516,7 @@ struct MediaSyncState {
   unsigned long lastSyncTime = 0;
   unsigned long localClockStartTime = 0;  // When local clock started running
   unsigned long lastMTCUpdateTime = 0;    // Last MTC send time
+  uint32_t mtcNextDueUs = 0;              // 2.4: micros() the next MTC frame is due (true 30/s)
   bool linkLost = false;
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;

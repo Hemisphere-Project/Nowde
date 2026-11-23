@@ -5,10 +5,10 @@ The sibling of nowde_sysex.py, for the other wire: nowde_sysex speaks the 7-bit 
 exchanges with a node over USB-MIDI, this speaks the packed little-endian structs nodes
 exchange over the air. Dependency-free on purpose (tools/selftest.py imports both).
 
-Today it covers `0x04 MIDI_EVENT` only, and that frame has no firmware behind it yet (#t-037
-builds it). The reason it is here first is the charter, docs/PROTOCOL.md §(b): `0x04` freezes
-the moment one fielded node parses it, so the layout is fixed on paper and the arithmetic that
-makes it fit 250 bytes is checked by a gate rather than remembered.
+Today it covers `0x04 MIDI_EVENT` only (midi_event.cpp builds and plays it since #t-037). It
+came here first, before the firmware, because of the charter, docs/PROTOCOL.md §(b): `0x04`
+freezes the moment one fielded node parses it, so the layout was fixed on paper and the
+arithmetic that makes it fit 250 bytes is checked by a gate rather than remembered.
 """
 
 # ---- wire constants ---------------------------------------------------------------

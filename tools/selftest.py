@@ -66,6 +66,11 @@ rq = nx.running_state_chunks([{'mac': [1, 2, 3, 4, 5, 6], 'layer': 'main', 'vers
 check(nx.parse(rq[0])[1]['receivers'][0]['sync_quality'] == 2, f"RUNNING_STATE sync_quality {nx.parse(rq[0])[1]}")
 
 check(nx.parse(nx.ota_begin(123456))[0] == 'OTA_BEGIN', "OTA_BEGIN")
+# 2.4: nowde-cli ota sends <= 100 B chunks on both paths. A node before 2.4 reads the SysEx length
+# as 8 bits, so every frame the CLI sends must stay under 256 B on the wire (F0 + payload + F7).
+check(len(nx.ota_data_acked(126, bytes(100))) + 2 < 256 and len(nx.ota_data(bytes(100))) + 2 < 256,
+      "nowde-cli's 100 B OTA chunks fit an 8-bit SysEx length")
+check(len(nx.ota_data(bytes(224))) + 2 > 255, "the old 224 B chunk did not (why the CLI changed)")
 
 # 2.4 (#t-046) — the acked OTA path and OTA_END's verdict. Byte layouts per PROTOCOL.md 0x0C / 0x23
 # and src/sysex.cpp (the chunk ack is 6 bytes on the wire, the END verdict 8).
@@ -144,6 +149,13 @@ check(len(hb) + 2 == 40, f"HELLO v2.1 length ({len(hb) + 2})")
 p = nx.parse(hb)[1]
 check(p['build_id'] == bid and p['sync_gaps'] == 0 and p['lr'] is False, f"HELLO build_id {p}")
 check('build_id' not in nx.parse(nx.hello('2.2.0', 1000, 1, 0, 3, 2, True, (False, 0, 0), 640))[1], "HELLO v2.2 unchanged")
+# 2.4: gen + node id behind the build id, raw ASCII (already 7-bit). Two-sided again.
+h24 = nx.hello('2.4-rc1', 1000, 1, 1, 2, 2, False, (False, 0, 0), 0, bid, gen=2, node_id='cd83fc')
+check(len(h24) + 2 == 47 and all(b < 0x80 for b in h24), f"HELLO 2.4 length ({len(h24) + 2})")
+p = nx.parse(h24)[1]
+check(p['gen'] == 2 and p['node_id'] == 'CD83FC' and p['build_id'] == bid and p['version'] == '2.4-rc1',
+      f"HELLO 2.4 gen + node_id {p}")
+check('gen' not in nx.parse(hb)[1], "HELLO v2.1 has no gen")
 
 ea = nx.running_state_chunks([], 1000, False, alone=True)[0]
 check(len(ea) + 2 == 15, f"RUNNING_STATE empty chunk + alone is 15 bytes ({len(ea) + 2})")   # MillluBridge floor is 14
@@ -322,6 +334,14 @@ def cfg_int(name):
     check(m, f"nowde_config.h defines {name}")
     return int(m.group(1))
 
+
+# 2.4: what the HELLO trailer, the version field and ESP-NOW's peer table hold, read from the C.
+check(cfg_int('NOWDE_HELLO_GEN') == 2 and cfg_int('NOWDE_NODE_ID_LEN') == nx.NODE_ID_LEN,
+      "nowde_config.h HELLO gen + node id match the codec")
+mv = re.search(r'^#define NOWDE_VERSION "([^"]*)"', cfg, re.M)
+check(mv and len(mv.group(1)) <= 7, f"NOWDE_VERSION fits the 8-byte NUL-terminated wire field ({mv and mv.group(1)})")
+check(cfg_int('MAX_SENDERS') + cfg_int('MAX_RECEIVERS') + 1 <= 20,
+      "senders + receivers + the broadcast peer fit ESP-NOW's 20 unencrypted peers")
 
 # The depth is derived from the lead, the batch window and the frame cap — and #t-038's figure,
 # 266, is what that derivation gives for v2.3's frozen constants. A change to any of them moves

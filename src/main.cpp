@@ -281,10 +281,19 @@ void espnowTask(void* parameter) {
         unsigned long localElapsed = now - mediaSyncState.localClockStartTime;
         uint32_t currentPositionMs = mediaSyncState.currentPositionMs + localElapsed;
 
-        // Send MTC at configured framerate
-        if (now - mediaSyncState.lastMTCUpdateTime >= (1000 / MTC_FRAMERATE)) {
+        // Send MTC at configured framerate. 2.4: scheduled by frame, not by `now` -- this loop
+        // ticks every 10 ms, so `last = now` against a 33 ms period fired every 40 ms (25/s).
+        // The next due time advances by one frame period in microseconds; a stall longer than a
+        // frame re-anchors on now instead of bursting to catch up.
+        const uint32_t mtcPeriodUs = 1000000UL / MTC_FRAMERATE;
+        uint32_t nowUs = micros();
+        if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
           midiSendTimeCode(currentPositionMs);
           mediaSyncState.lastMTCUpdateTime = now;
+          mediaSyncState.mtcNextDueUs += mtcPeriodUs;
+          if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
+            mediaSyncState.mtcNextDueUs = nowUs + mtcPeriodUs;
+          }
         }
       }
 

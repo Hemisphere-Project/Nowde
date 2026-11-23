@@ -7,6 +7,7 @@
 #include <esp_now.h>
 #include <esp_system.h>
 #include <esp_app_desc.h>
+#include <esp_mac.h>
 #include <Update.h>
 
 #include "esp_now_handlers.h"
@@ -118,6 +119,10 @@ int encode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   return outIdx;
 }
 
+// The most 7-bit-encoded bytes whose decode fits a 256 B chunk buffer (293 -> 256). OTA chunks are
+// <= 255 B by the length byte of OTA_DATA_ACKED; a longer frame is dropped, never decoded.
+constexpr int OTA_MAX_ENCODED = 293;
+
 // Decodes 7-bit MIDI format back to 8-bit data
 int decode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   int outIdx = 0;
@@ -142,7 +147,7 @@ int decode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   return outIdx;
 }
 
-void handleSysExMessage(const uint8_t* data, uint8_t length) {
+void handleSysExMessage(const uint8_t* data, uint16_t length) {
   // Basic validation
   if (length < 2) {
     return;  // Too short to be valid
@@ -306,7 +311,13 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       // Format: F0 7D 06 [data(7-bit encoded)] F7
       if (otaInProgress && length > 4) {
         // Decode data (encoded length - 3 for header/footer)
-        uint8_t encodedLen = length - 4;  // Subtract F0, 7D, 06, F7
+        int encodedLen = length - 4;  // Subtract F0, 7D, 06, F7
+        if (encodedLen > OTA_MAX_ENCODED) {
+          // 2.4: only reachable since length is uint16_t. Dropped, not written: END's size check
+          // then refuses the image instead of a stack overflow corrupting it.
+          sendErrorReport(ERROR_SYSEX_PARSE_ERROR, nullptr, 0);
+          break;
+        }
         uint8_t decodedData[256];
         int decodedLen = decode7bit(&data[3], encodedLen, decodedData);
         
@@ -348,9 +359,9 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       uint8_t st = 3;
       if (otaInProgress && length >= 6) {
         uint8_t want = data[4];
-        uint8_t encodedLen = length - 6;  // F0 7D 0C seq len ... F7
+        int encodedLen = length - 6;  // F0 7D 0C seq len ... F7
         uint8_t decodedData[256];
-        int decodedLen = decode7bit(&data[5], encodedLen, decodedData);
+        int decodedLen = encodedLen <= OTA_MAX_ENCODED ? decode7bit(&data[5], encodedLen, decodedData) : -1;
         if (decodedLen != want || want == 0) {
           st = 1;                          // short/garbled frame: drop it, the host resends
         } else if ((int16_t)seq == otaLastSeq && want == otaLastLen) {
@@ -753,9 +764,9 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 
 void sendHello() {
   // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)]
-  //         [syncQuality(1)] [lr(1)] [syncGaps(2)] [buildId(8,encoded:10)] F7
+  //         [syncQuality(1)] [lr(1)] [syncGaps(2)] [buildId(8,encoded:10)] [gen(1)] [nodeId(6)] F7
   // Sent on boot and on QUERY_CONFIG / SET_ROLE. Everything after bootReason is a trailing field,
-  // appended in release order (v2, 2.0.1, 2.0.3, v2.2, v2.1).
+  // appended in release order (v2, 2.0.1, 2.0.3, v2.2, v2.1, 2.4).
   
   uint8_t rawData[16];
   uint8_t message[64];
@@ -818,6 +829,16 @@ void sendHello() {
   // wire; this tells them apart, and the same bytes sit at offset 0xB0 of the .bin, so a host checks
   // a unit against a file instead of reflashing it to be sure (the 04/09 provisioning).
   msgIdx += encode7bit(esp_app_get_description()->app_elf_sha256, NOWDE_BUILD_ID_LEN, &message[msgIdx]);
+  // 2.4 trailer: protocol generation, then the node id (payload 36, 37..42). ASCII hex is
+  // already 7-bit, so it goes raw: a host reads the same six characters the USB name shows.
+  message[msgIdx++] = NOWDE_HELLO_GEN & 0x7F;
+  {
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    char nodeId[NOWDE_NODE_ID_LEN + 1];
+    snprintf(nodeId, sizeof(nodeId), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+    for (int i = 0; i < NOWDE_NODE_ID_LEN; i++) message[msgIdx++] = (uint8_t)nodeId[i] & 0x7F;
+  }
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length

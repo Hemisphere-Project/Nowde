@@ -73,7 +73,7 @@ receivers emit.
   clock and sends `CC#100 = 0` (configurable: freewheel instead).
 - v2 adds **MTC full-frame** SysEx (`F0 7F 7F 01 01 hh mm ss ff F7`) on start and
   jumps, and **MIDI Start / Stop** on state edges.
-- *(v2.3, specified and not yet implemented)* **Relayed channel-voice messages** from the
+- *(v2.3)* **Relayed channel-voice messages** from the
   master's host — Note, CC, Program Change, Channel Pressure, Pitch Bend — on their original
   channel, emitted at the mesh time the master scheduled them for. A host sees ordinary MIDI
   and has nothing new to implement; the transport is the `0x04` event frame, in

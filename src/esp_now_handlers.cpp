@@ -67,7 +67,19 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     }
     DEBUG_SERIAL.printf("(%d bytes)\r\n", len);
 
-    handleSysExMessage(data, static_cast<uint8_t>(len));
+    // 2.4: raw SysEx over the air is a host command arriving without a host. Only one is ever
+    // sent that way -- the master's CHANGE_RECEIVER_LAYER to a slave -- so only that one runs,
+    // and only from the master this slave is locked to. Anything else (OTA, SET_ROLE, SET_LR,
+    // CONFIG...) from anyone in earshot is dropped and logged, never executed.
+    bool fromLockedOrigin = originLock.valid && macEqual(originLock.mac, info->src_addr);
+    if (len < 4 || data[1] != SYSEX_MANUFACTURER_ID || data[2] != SYSEX_CMD_CHANGE_RECEIVER_LAYER ||
+        !fromLockedOrigin) {
+      DEBUG_SERIAL.printf("[ESP-NOW RX] SysEx dropped: cmd %02X %s\r\n", len >= 3 ? data[2] : 0xFF,
+                          fromLockedOrigin ? "not whitelisted" : "not from the locked origin");
+      return;
+    }
+
+    handleSysExMessage(data, static_cast<uint16_t>(len));
     return;
   }
 

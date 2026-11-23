@@ -45,6 +45,7 @@ MEDIASYNC_FLAG_VOLUME = 0x01
 MEDIASYNC_FLAG_MUTE = 0x02
 
 
+NODE_ID_LEN = 6           # 2.4: HELLO's node id, the MAC's last 3 bytes as hex ASCII (NOWDE_NODE_ID_LEN)
 BUILD_ID_LEN = 8          # v2.1: HELLO carries this many bytes of the app ELF SHA-256 (NOWDE_BUILD_ID_LEN)
 APP_DESC_MAGIC = 0xABCD5432
 APP_IMAGE_OFFSET = 0x10000  # where the app sits in a merged (bootloader + partitions + app) image
@@ -194,11 +195,12 @@ def ota_ack(seq, status, duplicates=None):
 # ---- node -> host -----------------------------------------------------------------
 
 def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
-          lr=None, link=None, sync_gaps=None, build_id=None):
+          lr=None, link=None, sync_gaps=None, build_id=None, gen=None, node_id=None):
     """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
     needs the ones before it: sync_quality (2.0.1), lr (2.0.3), link (2.0.5: a
     (link_lost, ms_since_sync, watchdog_restarts) tuple), sync_gaps (v2.2, 14-bit),
-    build_id (v2.1: BUILD_ID_LEN raw bytes, or their hex string)."""
+    build_id (v2.1: BUILD_ID_LEN raw bytes, or their hex string), gen + node_id (2.4: the
+    protocol generation and the 6-character node id, the USB name's suffix)."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
     if role is not None:
@@ -217,6 +219,9 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
                         if build_id is not None:
                             b = bytes.fromhex(build_id) if isinstance(build_id, str) else bytes(build_id)
                             out += encode7(list(b[:BUILD_ID_LEN].ljust(BUILD_ID_LEN, b'\x00')))
+                            if gen is not None:
+                                nid = str(node_id or '').upper().encode('ascii')[:NODE_ID_LEN]
+                                out += [int(gen) & 0x7F] + list(nid.ljust(NODE_ID_LEN, b'0'))
     return out
 
 
@@ -297,6 +302,9 @@ def parse(data):
             info['sync_gaps'] = (d[24] << 7) | d[25]   # v2.2: MEDIA_SYNC frames this node missed
         if len(d) >= 36:
             info['build_id'] = bytes(decode7(d[26:36])[:BUILD_ID_LEN]).hex()   # v2.1: app ELF SHA-256 head
+        if len(d) >= 43:                   # 2.4: protocol generation + node id (the USB name's suffix)
+            info['gen'] = d[36]
+            info['node_id'] = bytes(d[37:43]).decode('ascii', 'replace')
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}

@@ -17,7 +17,7 @@
                                           stream MEDIA_SYNC playing INDEX (loop of SEC seconds) for -t seconds or until Ctrl-C
   nowde-cli stop [-l LAYER]               one MEDIA_SYNC with state=stopped
   nowde-cli rfsim on|off [DELAY_MS]       RF simulation (random send delay) on the sender
-  nowde-cli ota FIRMWARE.bin              firmware update over USB-MIDI (the Bridge's OTA flow)
+  nowde-cli ota FIRMWARE.bin [--blind]     firmware update over USB-MIDI: acked 100 B chunks, ends on the node's verdict
   nowde-cli build-id FIRMWARE.bin...      the build id each image will report in HELLO (v2.1) — compare with `hello`
 
 Port selection: -p PATTERN (regex on the port name, default ^Nowde). Run with uv:
@@ -265,28 +265,76 @@ def cmd_rfsim(a):
     n.close()
 
 
+def _ota_acks(n, mark):
+    """OTA_ACK frames received since index `mark` of n.received, parsed, oldest first."""
+    with n.lock:
+        msgs = n.received[mark:]
+    out = []
+    for _, m in msgs:
+        if m.type == 'sysex' and len(m.data) >= 2 and m.data[0] == nx.MANUFACTURER and m.data[1] == nx.CMD_OTA_ACK:
+            out.append(nx.parse(list(m.data))[1])
+    return out
+
+
 def cmd_ota(a):
+    """2.4: no QUERY_CONFIG first (OTA is not sender-gated since 2.0.3, and QUERY_CONFIG turns a
+    legacy node into a sender). Default is the acked path, OTA_DATA_ACKED: <= 100 B chunks, one
+    at a time, each resent until the node acks it -- a duplicate it already wrote is acked and not
+    written again (2.4). The run ends on the node's END verdict, not on a port that vanished.
+    --blind is the pre-2.0.3 stream (OTA_DATA, no acks), in <= 100 B chunks too: 224 B chunks made
+    a 260 B frame the node's 8-bit length wrapped. Exit 0 only on a validated image."""
     data = open(a.firmware, 'rb').read()
-    n = Node(a.port)
-    n.send(nx.query_config(), 'QUERY_CONFIG')          # OTA needs sender mode on the node
-    n.wait_for(nx.CMD_HELLO)
-    time.sleep(0.3)
-    print(f"OTA {len(data)} bytes from {a.firmware}")
+    n = Node(a.port, quiet=True)
+    print(f"OTA {len(data)} bytes from {a.firmware} to {n.name} ({'blind' if a.blind else 'acked'})")
     n.send(nx.ota_begin(len(data)), 'OTA_BEGIN')
     time.sleep(0.5)
-    chunk = 224                                        # 7-bit encoded -> 256 bytes, the firmware buffer
-    sent = 0
+    chunk = 100
+    sent = resends = 0
     t0 = time.time()
-    for i in range(0, len(data), chunk):
-        n.send(nx.ota_data(data[i:i + chunk]))
-        sent += len(data[i:i + chunk])
-        if (i // chunk) % 50 == 0:
+    for k, i in enumerate(range(0, len(data), chunk)):
+        part = data[i:i + chunk]
+        if a.blind:
+            n.send(nx.ota_data(part))
+            time.sleep(a.pace)
+        else:
+            seq = k % 127                              # 0x7F is OTA_END's verdict
+            for attempt in range(a.retries + 1):
+                mark = len(n.received)
+                n.send(nx.ota_data_acked(seq, part))
+                end = time.time() + a.ack_timeout
+                ack = None
+                while time.time() < end and ack is None:
+                    ack = next((x for x in _ota_acks(n, mark) if not x.get('end') and x.get('seq') == seq), None)
+                    if ack is None:
+                        time.sleep(0.002)
+                if ack and ack['status'] == 0:
+                    break
+                if ack and ack['status'] in (2, 3):
+                    print(f"\n  chunk {k} at {i}: {ack['verdict']} -- the node closed the session")
+                    n.close()
+                    sys.exit(1)
+                resends += 1
+            else:
+                print(f"\n  chunk {k} at {i}: no ok ack after {a.retries + 1} sends -- giving up")
+                n.close()
+                sys.exit(1)
+        sent += len(part)
+        if k % 50 == 0:
             print(f"\r  {100 * sent // len(data):3d}%  {sent}/{len(data)}", end='', flush=True)
-        time.sleep(a.pace)
-    print(f"\r  100%  {sent}/{len(data)} in {time.time() - t0:.1f}s")
-    n.send(nx.ota_end(), 'OTA_END (node verifies and reboots)')
-    time.sleep(3.0)
+    print(f"\r  100%  {sent}/{len(data)} in {time.time() - t0:.1f}s, {resends} resent")
+    mark = len(n.received)
+    n.send(nx.ota_end(), 'OTA_END')
+    end = time.time() + 15.0
+    verdict = None
+    while time.time() < end and verdict is None:
+        verdict = next((x for x in _ota_acks(n, mark) if x.get('end')), None)
+        time.sleep(0.05)
     n.close()
+    if verdict is None:
+        print("  no END verdict (a node before 2.4 sends none: check its HELLO build id after the reboot)")
+        sys.exit(2)
+    print(f"  END: {verdict['verdict']}, {verdict['duplicates']} duplicate chunk(s) acked unwritten")
+    sys.exit(0 if verdict['status'] == 4 else 1)
 
 
 def cmd_build_id(a):
@@ -320,7 +368,12 @@ def main():
     y.set_defaults(f=cmd_play)
     s = sp.add_parser('stop'); s.add_argument('-l', '--layer', default='hplayer2'); s.set_defaults(f=cmd_stop)
     f = sp.add_parser('rfsim'); f.add_argument('state', choices=['on', 'off']); f.add_argument('delay', type=int, nargs='?', default=400); f.set_defaults(f=cmd_rfsim)
-    o = sp.add_parser('ota'); o.add_argument('firmware'); o.add_argument('--pace', type=float, default=0.004, help='s between chunks'); o.set_defaults(f=cmd_ota)
+    o = sp.add_parser('ota'); o.add_argument('firmware')
+    o.add_argument('--blind', action='store_true', help='pre-2.0.3 node: OTA_DATA stream, no acks')
+    o.add_argument('--pace', type=float, default=0.004, help='--blind: s between chunks')
+    o.add_argument('--ack-timeout', type=float, default=0.5, help='s to wait for a chunk ack')
+    o.add_argument('--retries', type=int, default=5, help='resends per chunk before giving up')
+    o.set_defaults(f=cmd_ota)
     b = sp.add_parser('build-id'); b.add_argument('firmware', nargs='+'); b.set_defaults(f=cmd_build_id)
     a = p.parse_args()
     a.f(a)
