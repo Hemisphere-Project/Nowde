@@ -18,6 +18,7 @@
   nowde-cli stop [-l LAYER]               one MEDIA_SYNC with state=stopped
   nowde-cli rfsim on|off [DELAY_MS]       RF simulation (random send delay) on the sender
   nowde-cli ota FIRMWARE.bin              firmware update over USB-MIDI (the Bridge's OTA flow)
+  nowde-cli build-id FIRMWARE.bin...      the build id each image will report in HELLO (v2.1) — compare with `hello`
 
 Port selection: -p PATTERN (regex on the port name, default ^Nowde). Run with uv:
   uv run tools/nowde-cli.py hello
@@ -149,18 +150,22 @@ def cmd_slaves(a):
     time.sleep(1.0)
     rows = []
     synced = None
+    alone = None
     with n.lock:
         for t, m in n.received:
             if m.type == 'sysex' and len(m.data) >= 2 and m.data[0] == nx.MANUFACTURER and m.data[1] == nx.CMD_RUNNING_STATE:
                 _, info = nx.parse(list(m.data))
                 synced = info['synced']
+                alone = info.get('alone', alone)
                 rows.extend(info['receivers'])
     if synced is None:
         print("no RUNNING_STATE: the node is not a sender (slave role, or legacy node before `hello`)")
     else:
         qname = {0: 'NONE', 1: 'coarse', 2: 'LOCKED', 0xFF: '?'}
         locked = sum(1 for r in rows if r.get('sync_quality') == 2)
-        print(f"mesh clock {'SYNCED' if synced else 'not synced'} · {len(rows)} slave(s) · {locked} LOCKED")
+        # v2.1: `alone` = no peer heard since boot, a lone master doing its job — not a lost mesh
+        print(f"mesh clock {'SYNCED' if synced else 'not synced'} · {len(rows)} slave(s) · {locked} LOCKED"
+              + (" · alone (no peer heard since boot)" if alone else ""))
         for r in rows:
             q = qname.get(r.get('sync_quality', 0xFF), '?')
             # v2.2: `missed` is what replaced the MAC ACK. Broadcast MEDIA_SYNC gets no
@@ -284,6 +289,13 @@ def cmd_ota(a):
     n.close()
 
 
+def cmd_build_id(a):
+    for path in a.firmware:
+        with open(path, 'rb') as fh:
+            bid = nx.bin_build_id(fh.read())
+        print(f"{bid or '(no app descriptor)':<16}  {path}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('-p', '--port', default='^Nowde', help='regex on the MIDI port name (default ^Nowde)')
@@ -309,6 +321,7 @@ def main():
     s = sp.add_parser('stop'); s.add_argument('-l', '--layer', default='hplayer2'); s.set_defaults(f=cmd_stop)
     f = sp.add_parser('rfsim'); f.add_argument('state', choices=['on', 'off']); f.add_argument('delay', type=int, nargs='?', default=400); f.set_defaults(f=cmd_rfsim)
     o = sp.add_parser('ota'); o.add_argument('firmware'); o.add_argument('--pace', type=float, default=0.004, help='s between chunks'); o.set_defaults(f=cmd_ota)
+    b = sp.add_parser('build-id'); b.add_argument('firmware', nargs='+'); b.set_defaults(f=cmd_build_id)
     a = p.parse_args()
     a.f(a)
 
