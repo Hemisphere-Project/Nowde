@@ -334,6 +334,83 @@ check(len(full) == nm.MIDI_EVENT_FRAME_MAX and nm.parse_midi_event(full) is not 
 print("nowde_mesh selftest OK")
 
 # ============================================================================================
+# 2.4 (#t-049) — tools/nowde-bench.py, the desk's acceptance. Its hardware half needs ports; its
+# judging half is pure and is what these rows pin: a parser that reads a timecode, an event or a
+# HELLO wrong turns a good desk run into a FAIL (or a bad one into a PASS). mido is imported only
+# when a port opens, so this runs where verify runs, with no MIDI stack installed.
+# ============================================================================================
+import importlib.util  # noqa: E402
+_spec = importlib.util.spec_from_file_location(
+    'nowde_bench', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nowde-bench.py'))
+nb = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(nb)
+check('mido' not in sys.modules, "nowde-bench imports mido only when a port opens")
+
+# MTC: 01:02:03:15 at 30 fps, as eight quarter-frame nibbles (rate 3 in qf7 bits 1-2) and as a
+# full frame (rate in hh bits 5-6).
+qf = [15 & 0xF, 15 >> 4, 3 & 0xF, 3 >> 4, 2 & 0xF, 2 >> 4, 1 & 0xF, (1 >> 4) | (3 << 1)]
+pos, fps = nb.mtc_qf_ms(qf)
+check(fps == 30.0 and pos == 3723000 + 500, f"quarter frames 01:02:03:15 @30 -> {pos} ms @ {fps}")
+check(nb.mtc_qf_ms(qf[:7] + [1 << 1])[1] == 25.0, "quarter frame rate bits 1 = 25 fps")
+check(nb.mtc_full_ms([0x7F, 0x7F, 1, 1, 1 | (3 << 5), 2, 3, 15]) == 3723500, "MTC full frame")
+check(nb.mtc_full_ms([0x7F, 0x7F, 1, 2, 0, 0, 0, 0]) is None, "a non-full-frame SysEx is not a timecode")
+
+st = nb.stats([1, -2, 3, -4, 10])
+check(st == {'n': 5, 'mean': 1.6, 'p95': 10.0, 'max': 10.0}, f"stats: signed mean, |x| p95 / max {st}")
+check(nb.stats([])['n'] == 0, "stats of nothing")
+
+script = nb.show_script(60, 60)
+check(nb.show_position(script, 10) == (True, 10000.0), "show: 10 s in plays at 10 000 ms")
+check(nb.show_position(script, 31) == (True, 121000.0), "show: the seek at 30 s jumps to 120 000 ms")
+check(nb.show_position(script, 61) == (False, 0.0) and nb.show_position(script, 200) == (False, 0.0),
+      "show: stopped after 60 s and after the end")
+# Offsets skip the 2 s after a start or a seek; an exact slave reads 0.
+t0 = 1000.0
+mtc = [(t0 + t, nb.show_position(script, t)[1] + 5) for t in (0.5, 10, 30.5, 45, 70)]
+check(nb.mtc_offsets(script, t0, mtc) == [5.0, 5.0], f"MTC offsets: settle windows and the idle skipped")
+
+plan = nb.event_plan()
+keys = [nb.event_key(*e) for e in plan]
+check(len(plan) == 128 + 26 and len(set(keys)) == len(keys), "0x04 plan: every event unique")
+check(all(not (e[0] == 'control_change' and e[2] == 100) for e in plan), "0x04 plan never uses CC#100")
+check(nb.event_key('note_on', 0, 60, 0) == nb.event_key('note_off', 0, 60, 0), "note-on velocity 0 = note-off")
+caps_a = [(1.000 + i * 0.01, k) for i, k in enumerate(keys)]
+caps_b = [(1.002 + i * 0.01, k) for i, k in enumerate(keys) if i != 3] + [(9.0, keys[7])]
+per, spread = nb.ledger(plan, {'a': caps_a, 'b': caps_b})
+check(per['a'] == {'sent': 154, 'received': 154, 'lost': 0, 'duplicated': 0}, f"ledger a {per['a']}")
+check(per['b'] == {'sent': 154, 'received': 153, 'lost': 1, 'duplicated': 1}, f"ledger b {per['b']}")
+check(spread['n'] == 152 and spread['max'] == 2.0, f"fire spread: events both got once ({spread})")
+
+ta = [(10.0 + i / 30.0, i * 1000 / 30.0 + 4) for i in range(30)]
+tc = [(10.0 + i / 30.0 + 0.003, i * 1000 / 30.0 + 3) for i in range(30)]
+po = nb.pair_offsets(ta, tc)
+check(len(po) == 30 and all(abs(x - 4.0) < 1e-6 for x in po), f"two-slave MTC pairing {po[:3]}")
+
+h = nx.parse(nx.hello('2.4-rc1', role=0, board=2, sync_quality=2, lr=2, link=(False, 5, 0),
+                      sync_gaps=3, build_id='0123456789abcdef', gen=2, node_id='cd83fc', rssi=-61))[1]
+row = nb.hello_row('Nowde - CD83FC', h)
+check(row == {'port': 'Nowde - CD83FC', 'version': '2.4-rc1', 'build_id': '0123456789abcdef', 'gen': 2,
+              'role': 'slave', 'board': 'atoms3', 'lr': '500k', 'node_id': 'CD83FC', 'sync': 2,
+              'gaps': 3, 'rssi': -61}, f"nodes row from a 2.4 HELLO {row}")
+check(nb.hello_row('x', None)['gen'] is None, "a silent node is a row of blanks")
+
+rs = nx.parse(nx.running_state_chunks([{'mac': [1, 2, 3, 0xCD, 0x83, 0xFC], 'sync_gaps': 9, 'rssi': -70}])[0])[1]
+wr = nb.walk_rows(0, 12.04, rs, '50 m')
+check(len(wr) == 1 and wr[0][1:] == ['12.0', '01:02:03:CD:83:FC', 1, 9, -70, 0, '50 m'] and len(wr[0]) == len(nb.WALK_HEADER),
+      f"walk row {wr}")
+check(nb.walk_rows(0, 1, None)[0][2:7] == ['', '', '', '', ''], "walk: nobody heard is one empty row")
+check(nb.heard_in(rs, 'CD83FC') and not nb.heard_in(rs, '26B8F8'), "a node is found in a table by its id")
+
+lines, ok = nb.summary({'command': 'x', 'checks': [{'name': 'a', 'pass': True}, {'name': 'b', 'pass': None}]})
+check(ok and lines[1].strip().startswith('INFO'), "summary: INFO never fails a run")
+lines, ok = nb.summary({'command': 'x', 'checks': [{'name': 'a', 'pass': True}, {'name': 'b', 'pass': False}]})
+check(not ok and lines[-1].startswith('FAIL'), "summary: one FAIL fails the run")
+for c in ('nodes', 'accept', 'drive', 'listen', 'lr', 'relay', 'ota', 'lr-set', 'walk'):
+    check(f'nowde-bench {c} ' in nb.__doc__, f"nowde-bench documents `{c}`")
+
+print("nowde-bench selftest OK")
+
+# ============================================================================================
 # #t-038 — the slave's schedule (docs/PROTOCOL.md "The schedule"). Its logic is a header with no
 # Arduino in it, src/midi_schedule.h, so the host runs the very code the firmware builds:
 # tools/midi_schedule_test.cpp, compiled here when a C++ compiler is on PATH. Without one the
