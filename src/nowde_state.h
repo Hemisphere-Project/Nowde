@@ -5,7 +5,7 @@
 #include <ESPNowMeshClock.h>
 #include "nowde_config.h"
 
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_USB_COMPOSITE
 #include <USBCDC.h>
 extern USBCDC USBSerial;   // composite CDC next to MIDI on the single USB-C
 #endif

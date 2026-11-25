@@ -17,7 +17,7 @@ constexpr unsigned long USB_STALL_DROP_MS = 200;
 
 QueueHandle_t midiQueue = nullptr;
 SemaphoreHandle_t frameLock = nullptr;
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
 RingbufHandle_t logRing = nullptr;
 bool logEnabled = false;
 bool logHistory = true;      // keep the backlog until the first host enables the log
@@ -54,7 +54,7 @@ void pumpLog() {
     }
     if (logEnabled) {
       const uint8_t* b = static_cast<const uint8_t*>(item);
-#if defined(NOWDE_LOG_CDC)
+#if defined(NOWDE_LOG_CDC) && NOWDE_USB_COMPOSITE
       if (static_cast<bool>(USBSerial)) USBSerial.write(b, n);
 #else
       for (size_t i = 0; i < n; i++) {
@@ -82,7 +82,7 @@ void usbOutInit() {
   if (!frameLock) {
     frameLock = xSemaphoreCreateMutex();
   }
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
   if (!logRing) {
     logRing = xRingbufferCreate(LOG_RING_BYTES, RINGBUF_TYPE_BYTEBUF);
   }
@@ -156,13 +156,13 @@ void usbOutPump() {
     }
     break;
   }
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
   pumpLog();
 #endif
 }
 
 void usbOutLogEnable(bool on) {
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
   logEnabled = on;
   logHistory = false;   // from now on: live while enabled, discarded while disabled
 #else
@@ -171,19 +171,21 @@ void usbOutLogEnable(bool on) {
 }
 
 bool usbOutLogEnabled() {
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
   return logEnabled;
 #else
   return false;
 #endif
 }
 
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_LOG_SYSEX
 UsbLog usbLog;
 
 void UsbLog::begin() {
+#if NOWDE_USB_COMPOSITE
   USBSerial.setTxTimeoutMs(5);
   USBSerial.begin();     // the interface must exist for the 1200-bps flash touch
+#endif
 }
 
 size_t UsbLog::write(uint8_t c) {

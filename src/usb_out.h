@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <USBMIDI.h>
 
+#include "nowde_config.h"   // NOWDE_LOG_SYSEX (it includes this header back; #pragma once on both)
+
 // ============= SINGLE USB WRITER, SINGLE ACTIVE ENDPOINT =============
 // TinyUSB is driven from ONE task only: the MIDI task (core 0) pumps the queue below into the
 // MIDI IN endpoint. Every other context (the ESP-NOW receive callback in the WiFi task, the
@@ -31,8 +33,8 @@ void usbOutPump();                                 // MIDI task only: drain to T
 void usbOutLogEnable(bool on);                     // SET_LOG from the host
 bool usbOutLogEnabled();
 
-#if defined(NOWDE_BOARD_ATOMS3)
-// Print sink for DEBUG_SERIAL on the composite build: bytes go to a ring buffer; the pump turns
+#if NOWDE_LOG_SYSEX
+// Print sink for DEBUG_SERIAL where the log rides the host link: bytes go to a ring buffer; the pump turns
 // complete lines into LOG frames. Until a host enables the log, the ring keeps the first 8 KB
 // since boot (the boot banner is delivered late, not lost).
 class UsbLog : public Print {

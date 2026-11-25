@@ -3,7 +3,7 @@
 #include <cstring>
 #include <esp_now.h>
 
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_USB_COMPOSITE
 USBCDC USBSerial(0);
 #endif
 

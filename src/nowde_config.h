@@ -35,13 +35,23 @@
 // Selected per PlatformIO env with -DNOWDE_BOARD_ATOMS3 (M5Stack AtomS3 / AtomS3 Lite,
 // single native USB-C, composite MIDI + CDC) or nothing (ESP32-S3 DevKitC-1: native USB
 // for MIDI, UART0 for logs — the MillluBridge baseline).
+//
+// Nowde 3 (#t-050 ①): what the code asks is a CAPABILITY, not the board's name --
+//   NOWDE_USB_COMPOSITE  the native USB carries a CDC interface beside MIDI (the 1200-bps touch)
+//   NOWDE_LOG_SYSEX      the log rides the host link as SysEx LOG frames (0x31) behind `usbLog`,
+//                        because the board has no separate log port (usb_out.h)
+// Today both follow the AtomS3; a serial-linked DevKit (#t-050 ②) turns on the second alone.
 #if defined(NOWDE_BOARD_ATOMS3)
   #define NOWDE_BOARD_NAME "atoms3"
+  #define NOWDE_USB_COMPOSITE 1
+  #define NOWDE_LOG_SYSEX 1
   #include "usb_out.h"
   #define DEBUG_SERIAL usbLog         // ring buffer -> USBCDC, pumped by the MIDI task (usb_out.h)
   #define NOWDE_HAS_UI 1
 #else
   #define NOWDE_BOARD_NAME "devkit"
+  #define NOWDE_USB_COMPOSITE 0
+  #define NOWDE_LOG_SYSEX 0
   #define DEBUG_SERIAL Serial         // UART0
   #define NOWDE_HAS_UI 0
 #endif
