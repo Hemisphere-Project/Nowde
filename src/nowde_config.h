@@ -16,7 +16,7 @@
 // frozen since v1.2 (HELLO version(8), ReceiverInfo/RUNNING_STATE version[8], the latter
 // NUL-terminated at [7]), so it holds 7 characters: `2.4.0-rc1` would read `2.4.0-r` on a
 // master's slave list. The build id (HELLO [26..35]) is what names the exact image.
-#define NOWDE_VERSION "2.4-rc1"
+#define NOWDE_VERSION "2.4.0"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
 // 2.4: 4 + 15, was 10 + 10. Every table entry is an ESP-NOW peer and so is the broadcast
