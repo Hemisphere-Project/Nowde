@@ -976,10 +976,14 @@ def kern_stalls(lines):
     return sum(1 for ln in lines if URB_STALL.search(ln))
 
 
-def role_seen(port, timeout=ROLE_SETTLE_S):
-    """The node's role after `timeout`: the last unsolicited HELLO if one came, else a fresh one."""
+def role_seen(port, timeout=ROLE_SETTLE_S, drive=()):
+    """The node's role after `timeout`: the last unsolicited HELLO if one came, else a fresh one.
+    `drive` = the ports whose host keeps driving meanwhile (poll_host): a wait must not end a hold."""
     mark = port.mark()
-    time.sleep(timeout)
+    if drive:
+        poll_host(drive, timeout)
+    else:
+        time.sleep(timeout)
     last = None
     for _, m in port.since(mark):
         if m.type == 'sysex' and len(m.data) >= 2 and m.data[0] == nx.MANUFACTURER and m.data[1] == nx.CMD_HELLO:
@@ -987,23 +991,34 @@ def role_seen(port, timeout=ROLE_SETTLE_S):
     return ((last or {}).get('role')) or ((port.hello() or {}).get('role'))
 
 
-def poll_host(ports, seconds):
-    """Keep each node's host link alive (HPlayer2 polls every 2 s) for `seconds`."""
-    end = time.time() + seconds
+def poll_host(ports, seconds, layer=SHOW_LAYER):
+    """Keep each node's host DRIVING for `seconds`, as a playing player does: MEDIA_SYNC at
+    MS_RATE_HZ, plus the 1 s poll. A poll alone keeps the link, not the role: a node counts its
+    host as driving on a claim or a MEDIA_SYNC within 5 s (proposal §5.1), so a polled-only sender
+    or standby drops to slave 5 s after its claim. No stop frame: the hold may go on in the next call."""
+    t0 = time.time()
+    end, nxt_sync, nxt_poll = t0 + seconds, 0.0, 0.0
     while time.time() < end:
-        for p in ports:
-            p.send(nx.query_running_state())
-        time.sleep(min(1.0, max(0.0, end - time.time())))
+        st = time.time() - t0
+        if st >= nxt_poll:
+            for p in ports:
+                p.send(nx.query_running_state())
+            nxt_poll += 1.0
+        if st >= nxt_sync:
+            for p in ports:
+                p.send(nx.media_sync(layer, SHOW_INDEX, st * 1000.0, True))
+            nxt_sync += 1.0 / MS_RATE_HZ
+        time.sleep(min(0.01, max(0.0, end - time.time())))
 
 
 def elect_claims(report, a, b):
     """Host claims on A then B: the last claim wins, the first yields to standby (its host still drives)."""
     a.send(nx.claim())
-    ra, rb = role_seen(a), (b.hello() or {}).get('role')
+    ra, rb = role_seen(a, drive=[a]), (b.hello() or {}).get('role')
     check(report, 'claim A: A sends', ra == 'master', f"A {ra}, B {rb}")
     b.send(nx.claim())
-    poll_host([a], 0.5)
-    rb, ra = role_seen(b), role_seen(a, 0.5)
+    poll_host([a, b], 0.5)
+    rb, ra = role_seen(b, drive=[a, b]), role_seen(a, 0.5, drive=[a, b])
     check(report, 'then claim B: the last claim wins', rb == 'master', f"B {rb}")
     check(report, 'then claim B: A yields to standby', ra == 'standby', f"A {ra}")
 
@@ -1015,11 +1030,10 @@ def elect_takeover(report, a, b_pattern):
     end, ra = time.time() + TAKEOVER_S, None
     t0 = time.time()
     while time.time() < end:
-        a.send(nx.query_running_state())
+        poll_host([a], 1.0)   # A's host still plays: a standby whose host stopped never takes over
         ra = (a.hello() or {}).get('role')
         if ra == 'master':
             break
-        time.sleep(1.0)
     check(report, "B's host silent: A takes over", ra == 'master', f"A {ra} after {time.time() - t0:.1f} s")
     b = Port(b_pattern, wait_s=5.0)
     rb = role_seen(b)
@@ -1033,8 +1047,8 @@ def elect_pin(report, a, b):
     b.send(nx.set_role('master'))
     poll_host([a, b], 0.5)
     a.send(nx.claim())
-    poll_host([b], 0.5)
-    ra, rb = role_seen(a), (b.hello() or {}).get('role')
+    poll_host([a, b], 0.5)
+    ra, rb = role_seen(a, drive=[a, b]), (b.hello() or {}).get('role')
     check(report, 'B pinned, claim A: the pin keeps it', rb == 'master' and ra in ('standby', 'slave'),
           f"A {ra}, B {rb}")
     b.send(nx.set_role('auto'))
@@ -1045,7 +1059,7 @@ def elect_legacy(report, a, legacy):
     legacy.send(nx.query_config())   # turns a legacy node into a sender, a 2.4 auto node too
     poll_host([a, legacy], 2.0)
     a.send(nx.claim())
-    ra = role_seen(a, 3.0)
+    ra = role_seen(a, 3.0, drive=[a])
     check(report, 'a 1-byte beacon is a pin: a claimed v3 node never competes', ra in ('standby', 'slave'),
           f"A {ra}, legacy {(legacy.hello() or {}).get('version')}")
 
@@ -1112,12 +1126,13 @@ def cmd_claim(a):
     p = Port(a.port)
     p.hello()
     p.send(nx.claim())
-    r = role_seen(p)
+    r = role_seen(p, drive=[p] if a.hold else ())
     check(report, f"{p.name}: claimed, sends", r == 'master', f"role {r}")
     if a.hold:
-        poll_host([p], a.hold)
+        poll_host([p], a.hold)   # this host plays on: standby if another claimed later, master again on a takeover
         r = (p.hello() or {}).get('role')
-        check(report, f"{p.name}: after {a.hold:.0f} s", None, f"role {r} (standby = another host claimed later)")
+        check(report, f"{p.name}: after {a.hold:.0f} s", None,
+              f"role {r} (standby = another host claimed later and plays on; master = it held, or took over)")
     p.send(nx.set_role('auto'))
     p.close()
     return finish(report, a.report)
