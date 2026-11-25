@@ -24,12 +24,20 @@ numbers (MTC offsets, fire spread) are a one-host measure and only `accept` / `l
 
 The firmware does not count stale 0x04 drops (they are silent by design), so a stale drop shows
 here as a lost event; NO_MEM is read from the node's own log (SET_LOG is on for the run).
+
+Every node a show check touches is put on the show's layer (`nowde-bench`) and put back on its
+own after: a slave follows MEDIA_SYNC only on its layer (or "*"), and a master stamps its 0x04
+events with its own (25/11 rig: a slave left on "-" heard nothing). `walk` streams on "*", since
+the far node is out of the tool's reach. `ota` refuses to start while this host's usbfix watchdog
+is armed (`touch /run/usbfix.inhibit` first: it re-enumerates a node mid-transfer).
 """
 import argparse
 import csv
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +52,19 @@ INTRUDER_INDEX = 5        # ... and the second master streams 5: a slave showing
 EVENT_CC = 20             # the 0x04 sweep's controller (CC#100 is the index, never on the radio)
 EVENT_CH = 0
 MS_RATE_HZ = 10
+SHOW_LAYER = 'nowde-bench'   # every show check runs here; take() moves the nodes, _restore() back
+WALK_LAYER = '*'             # the walk's far node is out of reach: the wildcard reaches any layer
+HOST_SILENCE_S = 5.5         # HOST_LINK_TIMEOUT_MS + margin: a master answers a linked host's probe
+                             # with its table, and HELLO only to a host that was quiet this long
+OTA_MAX_RESENDS = 50         # a node that acks late on every chunk: stop and say so, never crawl
+
+
+class CouldNotRun(Exception):
+    """Exit 2: no port, no MIDI stack, an unsafe host -- the run never judged a node (1 = a FAIL)."""
+
+
+class NoPort(CouldNotRun):
+    pass
 
 
 # ---- pure helpers (tools/selftest.py) -----------------------------------------------
@@ -148,6 +169,14 @@ def mtc_offsets(script, t_start, mtc, settle_s=2.0):
     return offs
 
 
+def booted_since(info, t_sent, now):
+    """True when a HELLO comes from a node that restarted after t_sent: its uptime is shorter than
+    the time since. SET_LR answers with a HELLO that already carries the new mode BEFORE it restarts,
+    so the mode alone proves nothing was applied."""
+    up = (info or {}).get('uptime_ms')
+    return up is not None and up / 1000.0 < now - t_sent
+
+
 def hello_row(port, info):
     info = info or {}
     return {'port': port, 'version': info.get('version'), 'build_id': info.get('build_id'),
@@ -187,8 +216,8 @@ def _mido():
     try:
         import mido
     except ImportError:
-        raise SystemExit("nowde-bench needs mido + python-rtmidi: `uv run tools/nowde-bench.py ...` "
-                         "(or pip install mido python-rtmidi)")
+        raise CouldNotRun("nowde-bench needs mido + python-rtmidi: `uv run tools/nowde-bench.py ...` "
+                          "(or pip install mido python-rtmidi)")
     return mido
 
 
@@ -208,8 +237,9 @@ class Port:
             if ins and outs:
                 break
             if time.time() >= end:
-                raise SystemExit(f"no MIDI port matching /{pattern}/ (inputs: {mido.get_input_names()})")
+                raise NoPort(f"no MIDI port matching /{pattern}/ (inputs: {mido.get_input_names()})")
             time.sleep(0.5)
+        self.pattern = pattern
         self.name = ins[0]
         self.lock = threading.Lock()
         self.msgs, self.mtc, self.logs = [], [], []
@@ -256,14 +286,25 @@ class Port:
             time.sleep(0.02)
         return None
 
-    def hello(self):
-        """QUERY_RUNNING_STATE, never QUERY_CONFIG (that one turns a legacy node into a sender)."""
+    def hello(self, quiet_retry=True):
+        """QUERY_RUNNING_STATE, never QUERY_CONFIG (that one turns a legacy node into a sender).
+        A master answers a host it already hears from with its table only; HELLO comes once the
+        host was quiet HOST_SILENCE_S -- so no HELLO = go quiet that long and ask once more."""
         mark = self.mark()
         self.send(nx.query_running_state())
         info = self.wait_for(nx.CMD_HELLO, 2.0, mark)
+        if not info and quiet_retry:
+            time.sleep(HOST_SILENCE_S)
+            mark = self.mark()
+            self.send(nx.query_running_state())
+            info = self.wait_for(nx.CMD_HELLO, 2.0, mark)
         if info:
             self.info = info
         return info
+
+    def listed(self):
+        """Is the port still on this host? (No = the node left USB: a reset, or a watchdog.)"""
+        return any(re.search(self.pattern, n) for n in _mido().get_input_names())
 
     def running_state(self, timeout=1.0):
         mark = self.mark()
@@ -336,7 +377,7 @@ def finish(report, path):
 
 # ---- the show (accept / drive / listen) -----------------------------------------------
 
-def run_show(master, script, plan, second=None, layer='nowde-bench', grab_at=None):
+def run_show(master, script, plan, second=None, layer=SHOW_LAYER, grab_at=None):
     """Stream the script into `master` at MS_RATE_HZ; send `plan` across the second play
     segment at ~100 events/s; promote `second` for the middle of the first segment, streaming
     INTRUDER_INDEX; read the master's RUNNING_STATE at `grab_at` s. Returns (t0, table)."""
@@ -413,10 +454,37 @@ def _open(patterns):
     return [Port(p) for p in patterns]
 
 
+_layers_before = {}   # port pattern -> the layer the node stood on before take() moved it
+
+
+def take(p, role, layer=SHOW_LAYER):
+    """Put p in `role` on the show's layer, remembering the layer it stood on for _restore. SET_ROLE
+    answers CONFIG_STATE (the layer before); SET_LOCAL_LAYER answers it again (the layer now),
+    which is what this returns. The layer is stored in NVS: it survives an LR restart."""
+    mark = p.mark()
+    p.send(nx.set_role(role))
+    cs = p.wait_for(nx.CMD_CONFIG_STATE, 1.0, mark) or {}
+    _layers_before.setdefault(p.pattern, cs.get('layer'))
+    mark = p.mark()
+    p.send(nx.set_local_layer(layer))
+    return (p.wait_for(nx.CMD_CONFIG_STATE, 1.0, mark) or {}).get('layer')
+
+
+def take_all(report, pairs):
+    """take() each (port, role); one check per node: a node off the layer hears no show."""
+    for p, role in pairs:
+        got = take(p, role)
+        check(report, f"{p.name}: {role} on layer {SHOW_LAYER}", got == SHOW_LAYER,
+              f"was {_layers_before.get(p.pattern)!r}, now {got!r}")
+
+
 def _restore(ports):
     for p in ports:
         p.send(nx.set_log(False))
         p.send(nx.set_role('auto'))
+        before = _layers_before.pop(p.pattern, None)
+        if before and before != SHOW_LAYER:
+            p.send(nx.set_local_layer(before))
     time.sleep(0.3)
 
 
@@ -447,9 +515,7 @@ def cmd_accept(a):
     second = Port(a.second_master) if a.second_master else None
     allp = [master] + slaves + ([second] if second else [])
     report['nodes'] = [hello_row(p.name, p.hello()) for p in allp]
-    master.send(nx.set_role('master'))
-    for p in slaves + ([second] if second else []):
-        p.send(nx.set_role('slave'))
+    take_all(report, [(master, 'master')] + [(p, 'slave') for p in slaves + ([second] if second else [])])
     for p in allp:
         p.send(nx.set_log(True))
     time.sleep(1.0)
@@ -481,7 +547,7 @@ def cmd_drive(a):
     report = {'command': 'drive', 'checks': []}
     master = Port(a.master)
     report['nodes'] = [hello_row(master.name, master.hello())]
-    master.send(nx.set_role('master'))
+    take_all(report, [(master, 'master')])
     master.send(nx.set_log(True))
     time.sleep(1.0)
     script, plan = _script(a), event_plan(32 if a.short else 128)
@@ -503,8 +569,8 @@ def cmd_listen(a):
     """Delivery only: lock, index, stop, 1 Hz, gaps, events — on this host's clock alone."""
     report = {'command': 'listen', 'checks': []}
     slaves = _open(a.slave)
+    take_all(report, [(p, 'slave') for p in slaves])
     for p in slaves:
-        p.send(nx.set_role('slave'))
         p.send(nx.set_log(True))
     before = {p.name: (p.hello() or {}).get('sync_gaps') for p in slaves}
     script, plan = _script(a), event_plan(32 if a.short else 128)
@@ -543,19 +609,30 @@ def cmd_listen(a):
 
 # ---- LR ------------------------------------------------------------------------------
 
-def set_lr(pattern, mode, port=None):
-    """SET_LR restarts the node: close, wait for the port to come back, read HELLO's lr mode."""
+def set_lr(pattern, mode, port=None, timeout=40.0):
+    """SET_LR stores the mode and restarts the node. The read-back counts only from a HELLO the
+    node sent AFTER that restart (booted_since): 25/11 the tool read the HELLO SET_LR answers
+    before restarting, and a master's table, and called that a result. Returns (port, lr mode);
+    mode None = no HELLO from after a restart within `timeout` (the port stays open)."""
     p = port or Port(pattern)
     p.send(nx.set_lr(mode))
+    t_sent = time.time()
     time.sleep(0.3)
     p.close()
-    time.sleep(3.0)
-    q = Port(pattern, wait_s=20.0)
-    info = q.hello() or {}
-    return q, info.get('lr_mode')
+    end, q = t_sent + timeout, None
+    while time.time() < end:
+        time.sleep(1.0)
+        q = Port(pattern, wait_s=max(0.0, end - time.time()))   # the old port may still be listed
+        info = q.hello()
+        if info and booted_since(info, t_sent, time.time()):
+            return q, info.get('lr_mode')
+        if time.time() < end:
+            q.close()
+            q = None
+    return q or Port(pattern, wait_s=5.0), None
 
 
-def stream(master, seconds, events=None, layer='nowde-bench'):
+def stream(master, seconds, events=None, layer=SHOW_LAYER):
     """MEDIA_SYNC at MS_RATE_HZ for `seconds`; `events` = a plan sent back to back each 5 ms."""
     t0, nxt, ei = time.time(), 0.0, 0
     while time.time() - t0 < seconds:
@@ -579,8 +656,7 @@ def cmd_lr(a):
     A, la = set_lr(a.a, lr_on)
     B, lb = set_lr(a.b, 'off')
     C = None
-    B.send(nx.set_role('master'))
-    A.send(nx.set_role('slave'))
+    take_all(report, [(B, 'master'), (A, 'slave')])
     # 1 + 6: an LR node and a plain one must not hear each other, and the LR one shows it.
     stream(B, a.settle)
     rs = B.running_state()
@@ -627,7 +703,7 @@ def cmd_lr(a):
     # 4: MTC offset between two slaves on this host, LR off vs on.
     if a.c:
         C = Port(a.c)
-        C.send(nx.set_role('slave'))
+        take_all(report, [(C, 'slave')])
         res = {}
         for mode in ('off', lr_on):
             for pat, prt in ((a.a, A), (a.b, B), (a.c, C)):
@@ -684,10 +760,10 @@ def cmd_relay(a):
     report = {'command': 'relay', 'checks': []}
     P = _open(a.chain)
     if len(P) != 3:
-        raise SystemExit('relay needs exactly three ports: master, relay, end')
+        raise CouldNotRun('relay needs exactly three ports: master, relay, end')
     for p in P:
         p.send(nx.set_neighbours())
-        p.send(nx.set_role('slave'))
+    take_all(report, [(p, 'slave') for p in P])
     macs = {}
     for k in (0, 1):   # P1's table names P2 and P3, P2's names P1: full MACs without QUERY_CONFIG
         P[k].send(nx.set_role('master'))
@@ -731,12 +807,24 @@ def cmd_relay(a):
 
 # ---- OTA ------------------------------------------------------------------------------
 
-def cmd_ota(a, chunk=100, ack_timeout=0.5, retries=8):
+def usbfix_armed():
+    """This host's usbfix watchdog is live and not inhibited: it re-enumerates a node whose host
+    logs no HELLO -- in the middle of an OTA (pi-tools usbfix/README: 22/09 at 88 %; again 25/11)."""
+    if os.path.exists('/run/usbfix.inhibit') or not shutil.which('systemctl'):
+        return False
+    return subprocess.run(['systemctl', 'is-active', '--quiet', 'usbfix.timer']).returncode == 0
+
+
+def cmd_ota(a, chunk=100, ack_timeout=0.5, retries=5):
+    """nowde-cli's acked path step for step (the one proven on 2.4 nodes, 25/11), plus the
+    injected duplicate: nothing between the port opening and OTA_BEGIN, the CLI's 5 resends."""
+    if usbfix_armed():
+        raise CouldNotRun("usbfix is armed on this host: `sudo touch /run/usbfix.inhibit` first "
+                          "(and `sudo rm` it after) -- it re-enumerates a node mid-transfer")
     report = {'command': 'ota', 'checks': []}
     data = open(a.image, 'rb').read()
     want = nx.bin_build_id(data)
     p = Port(a.node)
-    report['before'] = hello_row(p.name, p.hello())
     p.send(nx.ota_begin(len(data)))
     time.sleep(0.5)
     dup_at = min(10, (len(data) - 1) // chunk) if a.inject_dup else None
@@ -768,13 +856,18 @@ def cmd_ota(a, chunk=100, ack_timeout=0.5, retries=8):
             resends += 1
         return False
 
-    ok = True
+    ok, why = True, ''
     for k, i in enumerate(range(0, len(data), chunk)):
         part = data[i:i + chunk]
         ok = send_chunk(k, part) and (k != dup_at or send_chunk(k, part))   # the duplicate, on purpose
+        if ok and resends > OTA_MAX_RESENDS:
+            ok, why = False, f"; stopped: {resends} resends by chunk {k}, the node acks late (USB starved?)"
         if not ok:
+            why = why or (f"; chunk {k} at {i} unacked, " +
+                          ('port still listed: the node went silent' if p.listed()
+                           else 'the port left USB: a reset or a watchdog'))
             break
-    check(report, 'every chunk acked', ok, f"{len(data)} B in {time.time() - t0:.1f} s, {resends} resent")
+    check(report, 'every chunk acked', ok, f"{len(data)} B in {time.time() - t0:.1f} s, {resends} resent{why}")
     verdict = None
     if ok:
         mark = p.mark()
@@ -818,7 +911,7 @@ def cmd_walk(a):
     if ((p.hello() or {}).get('lr_mode')) != a.lr:
         p, mode = set_lr(a.master, a.lr, p)
         if mode != a.lr:
-            raise SystemExit(f"could not set LR {a.lr} (HELLO says {mode})")
+            raise CouldNotRun(f"could not set LR {a.lr} (HELLO from after the restart says {mode})")
     p.send(nx.set_role('master'))
     path = a.csv or time.strftime(f'walk-%Y%m%d-%H%M-{a.lr}.csv')
     notes = []
@@ -832,7 +925,7 @@ def cmd_walk(a):
             while True:
                 st = time.time() - t0
                 if st >= nxt:
-                    p.send(nx.media_sync('nowde-walk', SHOW_INDEX, st * 1000.0, True))
+                    p.send(nx.media_sync(WALK_LAYER, SHOW_INDEX, st * 1000.0, True))
                     nxt += 1.0 / MS_RATE_HZ
                 if st - last_rs >= 1.0:
                     last_rs = st
@@ -845,7 +938,7 @@ def cmd_walk(a):
                 time.sleep(0.01)
         except KeyboardInterrupt:
             pass
-    p.send(nx.media_sync('nowde-walk', 0, 0, False))
+    p.send(nx.media_sync(WALK_LAYER, 0, 0, False))
     print(f"\n{path}")
     p.close()
     return 0
@@ -897,9 +990,13 @@ def main(argv=None):
     s.add_argument('--csv')
     a = ap.parse_args(argv)
     a.report = a.report or time.strftime(f'nowde-bench-{a.cmd}-%Y%m%d-%H%M%S.json')
-    return {'nodes': cmd_nodes, 'accept': cmd_accept, 'drive': cmd_drive, 'listen': cmd_listen,
-            'lr': cmd_lr, 'relay': cmd_relay, 'ota': cmd_ota, 'lr-set': cmd_lr_set,
-            'walk': cmd_walk}[a.cmd](a)
+    try:
+        return {'nodes': cmd_nodes, 'accept': cmd_accept, 'drive': cmd_drive, 'listen': cmd_listen,
+                'lr': cmd_lr, 'relay': cmd_relay, 'ota': cmd_ota, 'lr-set': cmd_lr_set,
+                'walk': cmd_walk}[a.cmd](a)
+    except CouldNotRun as e:
+        print(f"could not run: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == '__main__':
