@@ -329,7 +329,7 @@ void espnowTask(void* parameter) {
 }
 
 void setup() {
-#if defined(NOWDE_BOARD_ATOMS3)
+#if NOWDE_USB_COMPOSITE
   // Single USB-C: descriptors first, then CDC + MIDI as one composite device.
   uiInit();                       // M5Unified: board detection + LCD/LED
   usbOutInit();                   // queues first: logging/HELLO below only enqueue
@@ -346,7 +346,7 @@ void setup() {
 
   printBanner();
 
-#if !defined(NOWDE_BOARD_ATOMS3)
+#if !NOWDE_USB_COMPOSITE
   configureUsbDescriptors();
   USB.begin();
   DEBUG_SERIAL.println("[INIT] USB initialized");

@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr uint8_t LED_PIN = 35;            // AtomS3 Lite WS2812
+constexpr uint8_t LED_PIN = NOWDE_LED_PIN; // the board profile (nowde_config.h)
 constexpr unsigned long REFRESH_MS = 200;  // 5 Hz
 constexpr unsigned long HOLD_RESET_MS = 3000;
 
@@ -255,7 +255,7 @@ void uiTick() {
 #else  // no UI (DevKit)
 
 void uiInit() {}
-uint8_t uiDetectBoard() { return NOWDE_BOARDID_DEVKIT; }
+uint8_t uiDetectBoard() { return NOWDE_BOARD_ID; }
 void uiTick() {}
 void uiLog(const char* line) { (void)line; }
 

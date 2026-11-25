@@ -31,30 +31,63 @@
 #define SENDER_BEACON_INTERVAL_MS 1000
 #define BRIDGE_REPORT_INTERVAL_MS 500
 
-// ============= BOARD =============
+// ============= BOARD PROFILE =============
 // Selected per PlatformIO env with -DNOWDE_BOARD_ATOMS3 (M5Stack AtomS3 / AtomS3 Lite,
 // single native USB-C, composite MIDI + CDC) or nothing (ESP32-S3 DevKitC-1: native USB
 // for MIDI, UART0 for logs — the MillluBridge baseline).
 //
-// Nowde 3 (#t-050 ①): what the code asks is a CAPABILITY, not the board's name --
+// Nowde 3 (#t-050 ①): the env names a board ONCE, here; everything else reads what the board
+// HAS -- the profile below -- never its name:
+//   NOWDE_BOARD_NAME     printed in the banner
+//   NOWDE_BOARD_ID       the id in HELLO / CONFIG_STATE when the firmware cannot tell better;
+//                        the M5 family resolves AtomS3 vs AtomS3 Lite at boot (uiDetectBoard)
+//   NOWDE_LED_KIND/PIN   the status LED (NOWDE_LED_NONE: none driven yet)
+//   NOWDE_BUTTON_PIN     the user button (-1: none read yet)
+//   NOWDE_SCREEN         the M5 screen / LED / button module is compiled in (ui.cpp)
+//   NOWDE_FLASH_MB       the flash the env's layout is cut for -- platformio.ini's
+//                        board_upload.flash_size and partitions say the same (#t-048)
+//   NOWDE_HOST_LINK      the default host link (NOWDE_LINK_*); ② adds the serial ones
+//   NOWDE_BOARD_LAYER    the layer a fresh node starts on
 //   NOWDE_USB_COMPOSITE  the native USB carries a CDC interface beside MIDI (the 1200-bps touch)
 //   NOWDE_LOG_SYSEX      the log rides the host link as SysEx LOG frames (0x31) behind `usbLog`,
 //                        because the board has no separate log port (usb_out.h)
-// Today both follow the AtomS3; a serial-linked DevKit (#t-050 ②) turns on the second alone.
+#define NOWDE_LED_NONE    0
+#define NOWDE_LED_WS2812  1
+#define NOWDE_LINK_USB_MIDI 0
+
 #if defined(NOWDE_BOARD_ATOMS3)
   #define NOWDE_BOARD_NAME "atoms3"
+  #define NOWDE_BOARD_ID NOWDE_BOARDID_UNKNOWN   // LCD or Lite: M5Unified tells at boot
+  #define NOWDE_LED_KIND NOWDE_LED_WS2812        // AtomS3 Lite; the AtomS3 shows the LCD instead
+  #define NOWDE_LED_PIN 35
+  #define NOWDE_BUTTON_PIN 41                    // BtnA, read through M5Unified
+  #define NOWDE_SCREEN 1
+  #define NOWDE_FLASH_MB 8
+  #define NOWDE_HOST_LINK NOWDE_LINK_USB_MIDI
+  #define NOWDE_BOARD_LAYER NOWDE_LAYER_WILDCARD
   #define NOWDE_USB_COMPOSITE 1
   #define NOWDE_LOG_SYSEX 1
-  #include "usb_out.h"
-  #define DEBUG_SERIAL usbLog         // ring buffer -> USBCDC, pumped by the MIDI task (usb_out.h)
-  #define NOWDE_HAS_UI 1
 #else
   #define NOWDE_BOARD_NAME "devkit"
+  #define NOWDE_BOARD_ID NOWDE_BOARDID_DEVKIT
+  #define NOWDE_LED_KIND NOWDE_LED_NONE          // the WS2812 on GPIO48 (v1.0) / 38 (v1.1): ③
+  #define NOWDE_LED_PIN -1
+  #define NOWDE_BUTTON_PIN -1                    // BOOT, GPIO0: ③
+  #define NOWDE_SCREEN 0
+  #define NOWDE_FLASH_MB 16                      // N16R8, the AnnaTV model; an N8 needs its own env
+  #define NOWDE_HOST_LINK NOWDE_LINK_USB_MIDI
+  #define NOWDE_BOARD_LAYER NOWDE_LAYER_UNASSIGNED
   #define NOWDE_USB_COMPOSITE 0
   #define NOWDE_LOG_SYSEX 0
-  #define DEBUG_SERIAL Serial         // UART0
-  #define NOWDE_HAS_UI 0
 #endif
+
+#if NOWDE_LOG_SYSEX
+  #include "usb_out.h"
+  #define DEBUG_SERIAL usbLog         // ring buffer -> LOG frames, pumped by the MIDI task (usb_out.h)
+#else
+  #define DEBUG_SERIAL Serial         // UART0
+#endif
+#define NOWDE_HAS_UI NOWDE_SCREEN
 
 // Board ids reported in HELLO / CONFIG_STATE
 #define NOWDE_BOARDID_UNKNOWN     0
@@ -81,11 +114,7 @@
 #define NOWDE_LAYER_UNASSIGNED "-"
 #define NOWDE_LAYER_WILDCARD   "*"
 #ifndef NOWDE_DEFAULT_LAYER
-  #if defined(NOWDE_BOARD_ATOMS3)
-    #define NOWDE_DEFAULT_LAYER NOWDE_LAYER_WILDCARD
-  #else
-    #define NOWDE_DEFAULT_LAYER NOWDE_LAYER_UNASSIGNED
-  #endif
+  #define NOWDE_DEFAULT_LAYER NOWDE_BOARD_LAYER
 #endif
 #define DEFAULT_RECEIVER_LAYER NOWDE_DEFAULT_LAYER
 
