@@ -24,6 +24,7 @@
 #include <esp_system.h>
 #include <esp_app_desc.h>
 #include <esp_mac.h>
+#include <esp_timer.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -57,6 +58,25 @@ void printBanner() {
   DEBUG_SERIAL.println("        board: " NOWDE_BOARD_NAME);
   DEBUG_SERIAL.println("═══════════════════════════════════");
   DEBUG_SERIAL.println();
+}
+
+// Nowde 3 (#t-050 ②): the mesh clock counts on fastmicros (ESPNowMeshClock's libclock), which
+// reads TIMG0 at a per-target base address with a divider that assumes an 80 MHz APB. A wrong
+// base or clock on a new target reads 0 or runs at the wrong rate: say so at boot, once, against
+// esp_timer, instead of letting it show up as mesh drift. Through DEBUG_SERIAL: on a UART-link
+// board, raw Serial is the host link.
+void clockSelfCheck() {
+  const int64_t ref0 = esp_timer_get_time();
+  const uint64_t fast0 = fastmicros64_isr();
+  delay(20);
+  const int64_t ref1 = esp_timer_get_time();
+  const uint64_t fast1 = fastmicros64_isr();
+  const long ref = (long)(ref1 - ref0);
+  const long fast = (long)(fast1 - fast0);
+  const long off = fast > ref ? fast - ref : ref - fast;
+  const bool ok = ref > 0 && off * 100 <= ref;   // within 1 % over 20 ms
+  DEBUG_SERIAL.printf("[INIT] clock self-check: fastmicros %ld us / esp_timer %ld us -- %s\r\n",
+                      fast, ref, ok ? "ok" : "FAIL");
 }
 
 #if NOWDE_HOST_LINK == NOWDE_LINK_USB_MIDI
@@ -391,6 +411,7 @@ void setup() {
   meshClock.setDebugLog(0);  // LOG_ALL / LOG_SYNC / LOG_BCAST / LOG_RX / 0
   meshClock.begin(false);
   DEBUG_SERIAL.println("[INIT] Mesh Clock initialized");
+  clockSelfCheck();
 
   delay(1000);
 
