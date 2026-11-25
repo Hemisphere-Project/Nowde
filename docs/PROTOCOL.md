@@ -537,7 +537,8 @@ watchdog restart logs `[WATCHDOG] boot after watchdog restart #n: <reason>`; `bo
 A resolved **master** enables sender mode at boot and beacons immediately. A resolved
 **slave** never becomes a sender: `QUERY_CONFIG` / `PUSH_FULL_CONFIG` only answer.
 `HELLO` and `CONFIG_STATE` report the resolved role (0 slave, 1 master, 2 legacy) and
-the board id (1 devkit, 2 atoms3, 3 atoms3-lite).
+the board id (1 devkit, 2 atoms3, 3 atoms3-lite; Nowde 3: 4 atom = M5 Atom Lite, 5 esp32 = a
+generic classic ESP32).
 
 ## v2 board UI
 

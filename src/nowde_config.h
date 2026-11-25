@@ -33,8 +33,9 @@
 
 // ============= BOARD PROFILE =============
 // Selected per PlatformIO env with -DNOWDE_BOARD_ATOMS3 (M5Stack AtomS3 / AtomS3 Lite,
-// single native USB-C, composite MIDI + CDC) or nothing (ESP32-S3 DevKitC-1: native USB
-// for MIDI, UART0 for logs — the MillluBridge baseline).
+// single native USB-C, composite MIDI + CDC), -DNOWDE_BOARD_ATOM (M5 Atom Lite) or
+// -DNOWDE_BOARD_ESP32 (a classic ESP32; both on the UART link), or nothing (ESP32-S3
+// DevKitC-1: native USB for MIDI, UART0 for logs — the MillluBridge baseline).
 //
 // Nowde 3 (#t-050 ①): the env names a board ONCE, here; everything else reads what the board
 // HAS -- the profile below -- never its name:
@@ -72,6 +73,33 @@
   #define NOWDE_BOARD_LAYER NOWDE_LAYER_WILDCARD
   #define NOWDE_USB_COMPOSITE 1
   #define NOWDE_LOG_SYSEX 1
+#elif defined(NOWDE_BOARD_ATOM)
+  // M5 Atom Lite (classic ESP32, 4 MB): no native USB -- the host link is UART0 through the
+  // board's USB-UART bridge, and the log rides it as LOG frames
+  #define NOWDE_BOARD_NAME "atom"
+  #define NOWDE_BOARD_ID NOWDE_BOARDID_ATOM
+  #define NOWDE_LED_KIND NOWDE_LED_WS2812        // SK6812, driven from ③
+  #define NOWDE_LED_PIN 27
+  #define NOWDE_BUTTON_PIN 39                    // read from ③
+  #define NOWDE_SCREEN 0
+  #define NOWDE_FLASH_MB 4
+  #define NOWDE_HOST_LINK NOWDE_LINK_UART
+  #define NOWDE_BOARD_LAYER NOWDE_LAYER_UNASSIGNED  // a serial node always has a host, as the DevKit
+  #define NOWDE_USB_COMPOSITE 0
+  #define NOWDE_LOG_SYSEX 1
+#elif defined(NOWDE_BOARD_ESP32)
+  // any classic ESP32 module (DevKitC v4, clones), 4 MB: as the Atom, minus LED and button
+  #define NOWDE_BOARD_NAME "esp32"
+  #define NOWDE_BOARD_ID NOWDE_BOARDID_ESP32
+  #define NOWDE_LED_KIND NOWDE_LED_NONE          // clones: a mono LED on GPIO2, if any (③)
+  #define NOWDE_LED_PIN -1
+  #define NOWDE_BUTTON_PIN -1                    // BOOT, GPIO0: ③
+  #define NOWDE_SCREEN 0
+  #define NOWDE_FLASH_MB 4
+  #define NOWDE_HOST_LINK NOWDE_LINK_UART
+  #define NOWDE_BOARD_LAYER NOWDE_LAYER_UNASSIGNED
+  #define NOWDE_USB_COMPOSITE 0
+  #define NOWDE_LOG_SYSEX 1
 #else
   #define NOWDE_BOARD_NAME "devkit"
   #define NOWDE_BOARD_ID NOWDE_BOARDID_DEVKIT
@@ -92,6 +120,10 @@
   #endif
 #endif
 
+#if CONFIG_IDF_TARGET_ESP32 && NOWDE_HOST_LINK != NOWDE_LINK_UART
+  #error "a classic ESP32 has no native USB: its host link is NOWDE_LINK_UART"
+#endif
+
 #if NOWDE_LOG_SYSEX
   #include "host_log.h"
   #define DEBUG_SERIAL hostLog        // ring buffer -> LOG frames, pumped by the MIDI task (host_log.h)
@@ -105,6 +137,8 @@
 #define NOWDE_BOARDID_DEVKIT      1
 #define NOWDE_BOARDID_ATOMS3      2
 #define NOWDE_BOARDID_ATOMS3_LITE 3
+#define NOWDE_BOARDID_ATOM        4   // Nowde 3: M5 Atom Lite (classic ESP32)
+#define NOWDE_BOARDID_ESP32       5   // Nowde 3: a generic classic ESP32
 
 // ============= ROLE =============
 // Stored in NVS ("nowde"/"role"). AUTO = decide from the board at boot:

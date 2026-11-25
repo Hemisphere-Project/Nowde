@@ -48,7 +48,7 @@ def set_neighbours(macs=()):
         raw += list(bytes.fromhex(m.replace(':', ''))) if isinstance(m, str) else list(m)
     assert len(raw) % 6 == 0 and len(raw) <= 48
     return [MANUFACTURER, CMD_SET_NEIGHBOURS] + encode7(raw)
-BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite'}
+BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite', 4: 'atom', 5: 'esp32'}  # 4, 5: Nowde 3
 ERROR_NAMES = {0x01: 'CONFIG_INVALID', 0x02: 'SYSEX_PARSE_ERROR', 0x03: 'ESPNOW_SEND_FAILED',
                0x04: 'MESH_CLOCK_LOST_SYNC', 0x05: 'RECEIVER_TIMEOUT', 0xFF: 'UNKNOWN'}
 # 2.4 (#t-046): OTA_END's verdict rides OTA_ACK with seq 0x7F (src/nowde_config.h).
