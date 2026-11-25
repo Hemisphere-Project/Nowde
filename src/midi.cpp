@@ -6,13 +6,65 @@
 #include "sysex.h"
 #include "usb_out.h"
 #include "host_clock.h"
+#include "midi_rx.h"
 
 namespace {
 constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
-uint8_t sysexBuffer[SYSEX_BUFFER_SIZE];
-size_t sysexIndex = 0;
-bool inSysex = false;
-bool sysexOverflow = false;
+MidiRxParser<SYSEX_BUFFER_SIZE> hostRx;    // Nowde 3 (#t-050 ①): the host link's receive parse
+
+// What the host sent, whatever the link: a short message or a complete SysEx frame.
+struct HostRxSink {
+  void message(uint8_t status, uint8_t d1, uint8_t d2) {
+    // v2.1 -- plain MIDI from the host (a master's DAW / QLab / keyboard)
+    if (status == 0xF1) {                       // MTC quarter-frame
+      hostClockOnQuarterFrame(d1);
+      return;
+    }
+    if (status >= 0xF8) {                       // single-byte real-time
+      hostClockOnRealtime(status);
+      return;
+    }
+    if (status < 0x80 || status >= 0xF0) {
+      return;                                   // other system common: nothing reads it
+    }
+    // A host CC feeds both the v2.1 clock and the v2.3 frame -- except CC#100, the media index:
+    // the slaves already get it inside MEDIA_SYNC and play it to their hosts from there (with
+    // its 1 s repeat and the stop edge), so on the frame too a slave's host would see two CC#100
+    // streams on their own timing, and the frame's 1 Hz snapshot would replay an index the
+    // MEDIA_SYNC path had already stopped. CC#100 stays off the radio.
+    if ((status & 0xF0) == 0xB0) {
+      hostClockOnControlChange(status & 0x0F, d1, d2);
+      if (d1 == 100) {
+        return;
+      }
+    }
+    midiEventCapture(status, d1, d2);           // v2.3 0x04 (#t-037): ONE call
+  }
+
+  void sysex(const uint8_t* frame, size_t len) {
+    // Only log SysEx for non-repetitive messages (to reduce clutter)
+    // Skip: MEDIA_SYNC (0x10) sent at 10Hz, QUERY_RUNNING_STATE (0x03) sent at 1Hz
+    // Skip: OTA_DATA (0x06) during firmware updates (thousands of messages)
+    bool isRepetitive = (len >= 3 &&
+                         (frame[2] == SYSEX_CMD_MEDIA_SYNC ||
+                          frame[2] == SYSEX_CMD_QUERY_RUNNING_STATE ||
+                          frame[2] == 0x06));  // OTA_DATA
+    if (!isRepetitive) {
+      DEBUG_SERIAL.print("[SYSEX RX] ");
+      for (size_t j = 0; j < len; j++) {
+        DEBUG_SERIAL.printf("%02X ", frame[j]);
+      }
+      DEBUG_SERIAL.printf("(%d bytes)\r\n", static_cast<int>(len));
+    }
+    handleSysExMessage(frame, static_cast<uint16_t>(len));
+  }
+
+  void sysexOverflow(size_t capacity) {
+    DEBUG_SERIAL.printf("[SYSEX RX] WARNING: SysEx overflow (len>%d), discarding message\r\n",
+                        static_cast<int>(capacity));
+  }
+};
+HostRxSink hostRxSink;
 
 struct Smpte {
   uint8_t frames, seconds, minutes, hours;
@@ -114,88 +166,7 @@ void midiProcess() {
       hostResumed = true;       // first packet after a silence: the host may be probing our role
     }
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
-    uint8_t cin = packet.header & 0x0F;
-
-    // v2.1 — plain MIDI from the host (a master's DAW / QLab / keyboard)
-    if (cin == 0x2 && packet.byte1 == 0xF1) {                 // MTC quarter-frame
-      hostClockOnQuarterFrame(packet.byte2);
-      continue;
-    }
-    if ((cin == 0xF || cin == 0x5) && packet.byte1 >= 0xF8) { // single-byte real-time
-      hostClockOnRealtime(packet.byte1);
-      continue;
-    }
-    if (cin >= 0x8 && cin <= 0xE) {
-      // A host CC feeds both the v2.1 clock and the v2.3 frame -- except CC#100, the media index:
-      // the slaves already get it inside MEDIA_SYNC and play it to their hosts from there (with
-      // its 1 s repeat and the stop edge), so on the frame too a slave's host would see two CC#100
-      // streams on their own timing, and the frame's 1 Hz snapshot would replay an index the
-      // MEDIA_SYNC path had already stopped. CC#100 stays off the radio.
-      if (cin == 0xB) {
-        hostClockOnControlChange(packet.byte1 & 0x0F, packet.byte2, packet.byte3);
-        if (packet.byte2 == 100) {
-          continue;
-        }
-      }
-      midiEventCapture(packet.byte1, packet.byte2, packet.byte3);   // v2.3 0x04 (#t-037): ONE call
-      continue;
-    }
-
-    if (cin >= 0x4 && cin <= 0x7) {
-      int dataBytes = 0;
-      if (cin == 0x4) {
-        dataBytes = 3;
-      } else if (cin == 0x5) {
-        dataBytes = 1;
-      } else if (cin == 0x6) {
-        dataBytes = 2;
-      } else if (cin == 0x7) {
-        dataBytes = 3;
-      }
-
-      if (dataBytes > 0) {
-        if (packet.byte1 == SYSEX_START) {
-          inSysex = true;
-          sysexIndex = 0;
-        }
-
-        if (inSysex) {
-          const uint8_t bytes[3] = {packet.byte1, packet.byte2, packet.byte3};
-          for (int i = 0; i < dataBytes; i++) {
-            if (sysexIndex < SYSEX_BUFFER_SIZE) {
-              sysexBuffer[sysexIndex++] = bytes[i];
-            } else {
-              sysexOverflow = true;  // Keep reading so we can resync at F7
-            }
-            if (bytes[i] == SYSEX_END) {
-              // Only log SysEx for non-repetitive messages (to reduce clutter)
-              // Skip: MEDIA_SYNC (0x10) sent at 10Hz, QUERY_RUNNING_STATE (0x03) sent at 1Hz
-              // Skip: OTA_DATA (0x06) during firmware updates (thousands of messages)
-              bool isRepetitive = (sysexIndex >= 3 && 
-                                   (sysexBuffer[2] == SYSEX_CMD_MEDIA_SYNC || 
-                                    sysexBuffer[2] == SYSEX_CMD_QUERY_RUNNING_STATE ||
-                                    sysexBuffer[2] == 0x06));  // OTA_DATA
-              if (!isRepetitive && !sysexOverflow) {
-                DEBUG_SERIAL.print("[SYSEX RX] ");
-                for (int j = 0; j < sysexIndex; j++) {
-                  DEBUG_SERIAL.printf("%02X ", sysexBuffer[j]);
-                }
-                DEBUG_SERIAL.printf("(%d bytes)\r\n", sysexIndex);
-              }
-              if (sysexOverflow) {
-                DEBUG_SERIAL.printf("[SYSEX RX] WARNING: SysEx overflow (len>%d), discarding message\r\n", SYSEX_BUFFER_SIZE);
-              } else {
-                handleSysExMessage(sysexBuffer, sysexIndex);
-              }
-              inSysex = false;
-              sysexIndex = 0;
-              sysexOverflow = false;
-              break;
-            }
-          }
-        }
-      }
-    }
+    hostRx.usbPacket(packet.header & 0x0F, packet.byte1, packet.byte2, packet.byte3, hostRxSink);
   }
 
   midiEventTick();   // v2.3 0x04 (#t-037): close a 5 ms batch, or send the owed carry-over
