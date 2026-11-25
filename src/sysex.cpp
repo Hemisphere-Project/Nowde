@@ -1,5 +1,6 @@
 #include "sysex.h"
-#include "usb_out.h"
+#include "host_link.h"
+#include "usb_out.h"   // usbOutLogEnable (the log, not the link)
 
 #include <cstring>
 #include <algorithm>
@@ -873,13 +874,13 @@ void sendHello() {
   
   DEBUG_SERIAL.printf("[HELLO] Sending %d bytes\r\n", idx);
   
-  usbOutSysEx(message, idx);
+  hostLinkSend(message, idx);
   
   DEBUG_SERIAL.println("[HELLO] Sent to Bridge");
 }
 
 void sendSysExBytes(const uint8_t* message, int len) {
-  usbOutSysEx(message, static_cast<size_t>(len));
+  hostLinkSend(message, static_cast<size_t>(len));
 }
 
 void sendConfigState() {
@@ -1052,7 +1053,7 @@ void sendRunningState() {
     message[msgIdx++] = SYSEX_END;
     int totalLen = msgIdx;
 
-    usbOutSysEx(message, static_cast<size_t>(totalLen));
+    hostLinkSend(message, static_cast<size_t>(totalLen));
   }
 }
 
@@ -1074,7 +1075,7 @@ void sendErrorReport(uint8_t errorCode, const uint8_t* context, uint8_t contextL
   
   message[idx++] = SYSEX_END;
   
-  usbOutSysEx(message, static_cast<size_t>(idx));
+  hostLinkSend(message, static_cast<size_t>(idx));
   
   const char* errorName = "UNKNOWN";
   switch (errorCode) {

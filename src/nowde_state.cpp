@@ -40,7 +40,6 @@ MediaSyncState mediaSyncState;
 MasterRelayState masterRelay;
 OriginLock originLock;
 
-unsigned long lastHostRxTime = 0;
 bool hostResumed = false;
 bool otaInProgress = false;
 
@@ -104,9 +103,6 @@ int countLockedReceivers() {
   return count;
 }
 
-bool hostLinked() {
-  return lastHostRxTime != 0 && (millis() - lastHostRxTime) < HOST_LINK_TIMEOUT_MS;
-}
 
 uint8_t nodeSyncQuality() {
   // The master is the clock reference -- it does not "follow", so it is trivially locked.

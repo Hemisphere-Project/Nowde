@@ -49,7 +49,6 @@ extern MasterRelayState masterRelay;
 extern OriginLock originLock;
 
 // Host link: last time any USB-MIDI packet came in from the host
-extern unsigned long lastHostRxTime;
 extern bool hostResumed;      // set when the host speaks after a silence; QUERY_RUNNING_STATE answers HELLO once
 extern bool otaInProgress;
 
@@ -95,7 +94,6 @@ int countConnectedReceivers();
 // Connected receivers this master believes are LOCKED (syncQuality == NOWDE_SYNC_LOCKED),
 // i.e. actually delivering in sync -- not merely alive. Feeds the "lock M/N" LCD line.
 int countLockedReceivers();
-bool hostLinked();
 // This node's own sync quality (NOWDE_SYNC_*): master = LOCKED (it is the reference); a
 // slave = how well it is following the master right now. The honest per-node lock signal.
 uint8_t nodeSyncQuality();

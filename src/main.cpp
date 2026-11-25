@@ -31,6 +31,7 @@
 #include <freertos/task.h>
 
 #include "esp_now_handlers.h"
+#include "host_link.h"
 #include "mesh_relay.h"
 #include "midi.h"
 #include "nowde_config.h"

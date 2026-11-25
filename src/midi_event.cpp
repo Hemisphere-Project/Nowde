@@ -8,7 +8,7 @@
 #include "midi_schedule.h"      // EventSchedule, frameClockTrusted(), recordFiresAt()
 #include "nowde_config.h"
 #include "nowde_state.h"
-#include "usb_out.h"
+#include "host_link.h"
 
 // docs/PROTOCOL.md "The v2.3 event frame (0x04)" -- what a v2.3 master emits:
 //   - host events are batched over MIDI_EVENT_BATCH_MS, opened by the first event of a batch;
@@ -236,7 +236,7 @@ void midiEventTick() {
 //   - the WiFi task (onDataRecv -> midiEventReceive) validates, filters, judges the clock, drops
 //     what is stale, dedups, and hands each record over with its fire time;
 //   - MIDI_Task (midiProcess -> midiEventFire, every 1 ms) owns the schedule, fires what is due,
-//     and reaches the host through usbOutMessage() like everything else.
+//     and reaches the host through hostLinkSendMessage() like everything else.
 // Records are SCHEDULED at fireAt + offset, never played on arrival -- that is what makes a chord
 // land together on every node and across a relay hop. The 10 ms ESPNOW_Task would cost +-10 ms.
 
@@ -298,7 +298,7 @@ bool evSeqFresh(const uint8_t* origin, uint16_t evSeq) {
 // Rule 5: re-emit on the record's own channel (channel voice: CIN = the status nibble, in
 // usb_midi_packets.h).
 void playRecord(uint8_t status, uint8_t data1, uint8_t data2) {
-  usbOutMessage(status, data1, data2);
+  hostLinkSendMessage(status, data1, data2);
 }
 
 void playScheduled(const ScheduledEvent& e) {

@@ -19,8 +19,8 @@
 
 void usbOutInit();                                 // before anything logs or sends
 // Queue one complete F0..F7 frame as USB-MIDI packets (CIN 4, then 5/6/7 on the last), contiguous
-// in the queue. The ONE SysEx packetizer: every frame to the host goes through here (Nowde 3's
-// HostLink::send). Queue full mid-frame: stops there, the host parser drops the unterminated frame.
+// in the queue. The ONE SysEx packetizer: every frame to the host goes through here (host_link's
+// hostLinkSend, the USB-MIDI backend). Queue full mid-frame: stops there, the host parser drops the unterminated frame.
 bool usbOutSysEx(const uint8_t* frame, size_t len);
 // Queue one short MIDI message (channel voice, MTC quarter frame, real-time) -- plain MIDI bytes,
 // status first; the packet is the backend's business (usb_midi_packets.h). false = queue full or

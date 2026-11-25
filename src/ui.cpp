@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <esp_system.h>
 
+#include "host_link.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "storage.h"

@@ -4,17 +4,13 @@
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "sysex.h"
-#include "usb_out.h"
+#include "host_link.h"
 #include "host_clock.h"
-#include "midi_rx.h"
 
 namespace {
-constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
-MidiRxParser<SYSEX_BUFFER_SIZE> hostRx;    // Nowde 3 (#t-050 ①): the host link's receive parse
-
 // What the host sent, whatever the link: a short message or a complete SysEx frame.
-struct HostRxSink {
-  void message(uint8_t status, uint8_t d1, uint8_t d2) {
+struct HostRxSink : HostLinkSink {
+  void message(uint8_t status, uint8_t d1, uint8_t d2) override {
     // v2.1 -- plain MIDI from the host (a master's DAW / QLab / keyboard)
     if (status == 0xF1) {                       // MTC quarter-frame
       hostClockOnQuarterFrame(d1);
@@ -41,7 +37,7 @@ struct HostRxSink {
     midiEventCapture(status, d1, d2);           // v2.3 0x04 (#t-037): ONE call
   }
 
-  void sysex(const uint8_t* frame, size_t len) {
+  void sysex(const uint8_t* frame, size_t len) override {
     // Only log SysEx for non-repetitive messages (to reduce clutter)
     // Skip: MEDIA_SYNC (0x10) sent at 10Hz, QUERY_RUNNING_STATE (0x03) sent at 1Hz
     // Skip: OTA_DATA (0x06) during firmware updates (thousands of messages)
@@ -59,7 +55,7 @@ struct HostRxSink {
     handleSysExMessage(frame, static_cast<uint16_t>(len));
   }
 
-  void sysexOverflow(size_t capacity) {
+  void sysexOverflow(size_t capacity) override {
     DEBUG_SERIAL.printf("[SYSEX RX] WARNING: SysEx overflow (len>%d), discarding message\r\n",
                         static_cast<int>(capacity));
   }
@@ -87,7 +83,7 @@ void midiInit() {
 }
 
 void midiSendCC(uint8_t cc, uint8_t value) {
-  usbOutMessage(0xB0, cc, value);   // control change, channel 1
+  hostLinkSendMessage(0xB0, cc, value);   // control change, channel 1
   DEBUG_SERIAL.printf("[MIDI TX] CC#%d = %d (channel 1)\r\n", cc, value);
 }
 
@@ -103,10 +99,10 @@ void midiSendTimeCode(uint32_t positionMs) {
   Smpte t = toSmpte(positionMs);
 
   auto sendQuarterFrame = [&](uint8_t piece, uint8_t nibble) {
-    usbOutMessage(0xF1, static_cast<uint8_t>((piece << 4) | (nibble & 0x0F)));
+    hostLinkSendMessage(0xF1, static_cast<uint8_t>((piece << 4) | (nibble & 0x0F)));
   };
 
-  usbOutLock();   // the 8 pieces stay contiguous in the queue
+  hostLinkLock();   // the 8 pieces stay contiguous in the queue
   sendQuarterFrame(0, t.frames & 0x0F);
   sendQuarterFrame(1, (t.frames >> 4) & 0x01);
   sendQuarterFrame(2, t.seconds & 0x0F);
@@ -117,7 +113,7 @@ void midiSendTimeCode(uint32_t positionMs) {
 
   uint8_t framerateCode = 3;  // 30 fps non-drop
   sendQuarterFrame(7, ((t.hours >> 4) & 0x01) | (framerateCode << 1));
-  usbOutUnlock();
+  hostLinkUnlock();
 
   static unsigned long lastMTCLog = 0;
   if (millis() - lastMTCLog > 5000) {
@@ -132,12 +128,12 @@ void midiSendFullFrame(uint32_t positionMs) {
   const uint8_t msg[10] = {0xF0, 0x7F, 0x7F, 0x01, 0x01,
                            static_cast<uint8_t>((3 << 5) | (t.hours & 0x1F)),
                            t.minutes, t.seconds, t.frames, 0xF7};
-  usbOutSysEx(msg, sizeof(msg));
+  hostLinkSend(msg, sizeof(msg));
   DEBUG_SERIAL.printf("[MIDI TX] MTC full-frame %02d:%02d:%02d:%02d\r\n", t.hours, t.minutes, t.seconds, t.frames);
 }
 
 static void sendRealtime(uint8_t status) {
-  usbOutMessage(status);   // single-byte system real-time
+  hostLinkSendMessage(status);   // single-byte system real-time
 }
 
 void midiSendStart() {
@@ -150,24 +146,12 @@ void midiSendStop() {
   DEBUG_SERIAL.println("[MIDI TX] Stop");
 }
 
-static bool midiReadPacket(midiEventPacket_t* packet) {
-  return MIDI.readPacket(packet);
-}
-
 void midiProcess() {
-  midiEventPacket_t packet;
-
   midiEventFire();   // v2.3 0x04 (#t-038): scheduled records whose mesh time has come
-  usbOutPump();      // MIDI task: everything queued for the host goes out here
+  hostLinkPump();    // MIDI task: everything queued for the host goes out here
   otaRestartPoll();  // 2.4: a validated OTA_END restarts here, after its verdict went out above
 
-  while (midiReadPacket(&packet)) {
-    if (!hostLinked()) {
-      hostResumed = true;       // first packet after a silence: the host may be probing our role
-    }
-    lastHostRxTime = millis();  // anything from the host counts as a heartbeat
-    hostRx.usbPacket(packet.header & 0x0F, packet.byte1, packet.byte2, packet.byte3, hostRxSink);
-  }
+  hostLinkPoll(hostRxSink);   // whatever the host sent, one complete message at a time
 
   midiEventTick();   // v2.3 0x04 (#t-037): close a 5 ms batch, or send the owed carry-over
 }
