@@ -89,7 +89,9 @@ void usbOutInit() {
 #endif
 }
 
-bool usbOutMidi(const midiEventPacket_t& packet) {
+// One USB-MIDI packet into the queue (false = queue full). TinyUSB's packet type stays in this
+// file and midi.cpp's receive loop: everything else hands plain MIDI bytes (Nowde 3, #t-050 ①).
+static bool usbOutMidi(const midiEventPacket_t& packet) {
   if (!midiQueue) {
     return false;
   }

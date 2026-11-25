@@ -236,7 +236,7 @@ void midiEventTick() {
 //   - the WiFi task (onDataRecv -> midiEventReceive) validates, filters, judges the clock, drops
 //     what is stale, dedups, and hands each record over with its fire time;
 //   - MIDI_Task (midiProcess -> midiEventFire, every 1 ms) owns the schedule, fires what is due,
-//     and reaches the host through usbOutMidi() like everything else.
+//     and reaches the host through usbOutMessage() like everything else.
 // Records are SCHEDULED at fireAt + offset, never played on arrival -- that is what makes a chord
 // land together on every node and across a relay hop. The 10 ms ESPNOW_Task would cost +-10 ms.
 

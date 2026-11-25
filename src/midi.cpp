@@ -150,7 +150,7 @@ void midiSendStop() {
   DEBUG_SERIAL.println("[MIDI TX] Stop");
 }
 
-bool midiReadPacket(midiEventPacket_t* packet) {
+static bool midiReadPacket(midiEventPacket_t* packet) {
   return MIDI.readPacket(packet);
 }
 

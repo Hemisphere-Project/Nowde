@@ -12,4 +12,3 @@ void midiSendFullFrame(uint32_t positionMs);      // MTC full-frame SysEx (v2)
 void midiSendStart();                             // MIDI real-time Start 0xFA (v2)
 void midiSendStop();                              // MIDI real-time Stop 0xFC (v2)
 void midiProcess();
-bool midiReadPacket(midiEventPacket_t* packet);
