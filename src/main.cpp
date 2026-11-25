@@ -328,14 +328,14 @@ void setup() {
 #if NOWDE_USB_COMPOSITE
   // Single USB-C: descriptors first, then CDC + MIDI as one composite device.
   uiInit();                       // M5Unified: board detection + LCD/LED
-  usbOutInit();                   // queues first: logging/HELLO below only enqueue
+  hostLinkInit();                 // queues first: logging/HELLO below only enqueue
   configureUsbDescriptors();
   midiInit();
   DEBUG_SERIAL.begin();           // USBCDC behind the log ring (usb_out.h)
   usbOutStart();
   delay(1500);                    // let the host enumerate before we log or HELLO
 #else
-  usbOutInit();
+  hostLinkInit();
   DEBUG_SERIAL.begin(115200);     // UART0
   delay(500);
 #endif

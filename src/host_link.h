@@ -18,6 +18,7 @@ struct HostLinkSink {
   ~HostLinkSink() = default;
 };
 
+void hostLinkInit();     // before anything logs or sends (setup)
 // send(bytes): one complete message to the host -- an F0..F7 frame, or a short message. false =
 // dropped (queue full, or not a message).
 bool hostLinkSend(const uint8_t* bytes, size_t len);

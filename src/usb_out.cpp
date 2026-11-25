@@ -4,7 +4,6 @@
 #include <USBMIDI.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-#include <freertos/ringbuf.h>
 #include <freertos/semphr.h>
 
 #include "nowde_config.h"
@@ -15,68 +14,10 @@ USBMIDI MIDI;   // the one TinyUSB MIDI interface: begun, pumped and read from t
 
 namespace {
 constexpr size_t MIDI_QUEUE_PACKETS = 1024;  // RUNNING_STATE bursts are ~120 packets per slave chunk
-constexpr size_t LOG_RING_BYTES = 8192;
-constexpr size_t LOG_LINE_MAX = 100;         // one LOG frame per line, capped
 constexpr unsigned long USB_STALL_DROP_MS = 200;
 
 QueueHandle_t midiQueue = nullptr;
 SemaphoreHandle_t frameLock = nullptr;
-#if NOWDE_LOG_SYSEX
-RingbufHandle_t logRing = nullptr;
-bool logEnabled = false;
-bool logHistory = true;      // keep the backlog until the first host enables the log
-char lineBuf[LOG_LINE_MAX];
-size_t lineLen = 0;
-
-// F0 7D 31 <ascii> F7 as USB-MIDI packets, contiguous in the queue
-void enqueueLogFrame(const char* text, size_t len) {
-  uint8_t msg[LOG_LINE_MAX + 4];
-  size_t n = 0;
-  msg[n++] = SYSEX_START;
-  msg[n++] = SYSEX_MANUFACTURER_ID;
-  msg[n++] = SYSEX_CMD_LOG;
-  for (size_t i = 0; i < len; i++) {
-    msg[n++] = static_cast<uint8_t>(text[i]) & 0x7F;
-  }
-  msg[n++] = SYSEX_END;
-  usbOutSysEx(msg, n);   // queue full: the line is lost, the host parser drops the truncated frame
-}
-
-void pumpLog() {
-  if (!logRing) {
-    return;
-  }
-  if (!logEnabled && logHistory) {
-    return;                      // nobody listens yet: keep the boot log for later
-  }
-  int chunks = 4;
-  while (chunks-- > 0) {
-    size_t n = 0;
-    void* item = xRingbufferReceiveUpTo(logRing, &n, 0, 128);
-    if (!item) {
-      break;
-    }
-    if (logEnabled) {
-      const uint8_t* b = static_cast<const uint8_t*>(item);
-#if defined(NOWDE_LOG_CDC) && NOWDE_USB_COMPOSITE
-      if (static_cast<bool>(USBSerial)) USBSerial.write(b, n);
-#else
-      for (size_t i = 0; i < n; i++) {
-        uint8_t c = b[i];
-        if (c == '\n' || lineLen >= LOG_LINE_MAX) {
-          if (lineLen > 0) enqueueLogFrame(lineBuf, lineLen);
-          lineLen = 0;
-          if (c == '\n') continue;
-        }
-        if (c == '\r' || c < 0x20 || c >= 0x80) continue;   // UTF-8 banner art is dropped
-        lineBuf[lineLen++] = static_cast<char>(c);
-      }
-#endif
-    }
-    vRingbufferReturnItem(logRing, item);   // disabled after a first enable: discard
-  }
-}
-#endif
 }  // namespace
 
 void usbOutInit() {
@@ -86,11 +27,6 @@ void usbOutInit() {
   if (!frameLock) {
     frameLock = xSemaphoreCreateMutex();
   }
-#if NOWDE_LOG_SYSEX
-  if (!logRing) {
-    logRing = xRingbufferCreate(LOG_RING_BYTES, RINGBUF_TYPE_BYTEBUF);
-  }
-#endif
 }
 
 void usbOutDescriptors(const char* productName) {
@@ -189,57 +125,4 @@ void usbOutPump() {
     }
     break;
   }
-#if NOWDE_LOG_SYSEX
-  pumpLog();
-#endif
 }
-
-void usbOutLogEnable(bool on) {
-#if NOWDE_LOG_SYSEX
-  logEnabled = on;
-  logHistory = false;   // from now on: live while enabled, discarded while disabled
-#else
-  (void)on;
-#endif
-}
-
-bool usbOutLogEnabled() {
-#if NOWDE_LOG_SYSEX
-  return logEnabled;
-#else
-  return false;
-#endif
-}
-
-#if NOWDE_LOG_SYSEX
-UsbLog usbLog;
-
-void UsbLog::begin() {
-#if NOWDE_USB_COMPOSITE
-  USBSerial.setTxTimeoutMs(5);
-  USBSerial.begin();     // the interface must exist for the 1200-bps flash touch
-#endif
-}
-
-size_t UsbLog::write(uint8_t c) {
-  return write(&c, 1);
-}
-
-size_t UsbLog::write(const uint8_t* buffer, size_t size) {
-  if (!logRing || !buffer || size == 0) {
-    return 0;
-  }
-  BaseType_t ok;
-  if (xPortInIsrContext()) {
-    BaseType_t woken = pdFALSE;
-    ok = xRingbufferSendFromISR(logRing, buffer, size, &woken);
-  } else {
-    ok = xRingbufferSend(logRing, buffer, size, 0);   // full = drop, never wait
-  }
-  return ok == pdTRUE ? size : 0;
-}
-
-int UsbLog::availableForWrite() {
-  return logRing ? static_cast<int>(xRingbufferGetCurFreeSize(logRing)) : 0;
-}
-#endif

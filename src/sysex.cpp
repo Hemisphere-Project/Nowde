@@ -1,6 +1,6 @@
 #include "sysex.h"
 #include "host_link.h"
-#include "usb_out.h"   // usbOutLogEnable (the log, not the link)
+#include "host_log.h"  // hostLogEnable (the log, not the link)
 
 #include <cstring>
 #include <algorithm>
@@ -772,7 +772,7 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
     case SYSEX_CMD_SET_LOG:
       // v2 — Format: F0 7D 0A [on] F7 ; stream the node log to the host as LOG (0x31) frames
       if (length >= 5) {
-        usbOutLogEnable(data[3] != 0);
+        hostLogEnable(data[3] != 0);
         DEBUG_SERIAL.printf("[SET_LOG] %s\r\n", data[3] ? "on" : "off");
       } else {
         sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);

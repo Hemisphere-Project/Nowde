@@ -49,8 +49,8 @@
 //   NOWDE_HOST_LINK      the default host link (NOWDE_LINK_*); ② adds the serial ones
 //   NOWDE_BOARD_LAYER    the layer a fresh node starts on
 //   NOWDE_USB_COMPOSITE  the native USB carries a CDC interface beside MIDI (the 1200-bps touch)
-//   NOWDE_LOG_SYSEX      the log rides the host link as SysEx LOG frames (0x31) behind `usbLog`,
-//                        because the board has no separate log port (usb_out.h)
+//   NOWDE_LOG_SYSEX      the log rides the host link as SysEx LOG frames (0x31) behind `hostLog`,
+//                        because the board has no separate log port (host_log.h)
 #define NOWDE_LED_NONE    0
 #define NOWDE_LED_WS2812  1
 #define NOWDE_LINK_USB_MIDI 0
@@ -82,8 +82,8 @@
 #endif
 
 #if NOWDE_LOG_SYSEX
-  #include "usb_out.h"
-  #define DEBUG_SERIAL usbLog         // ring buffer -> LOG frames, pumped by the MIDI task (usb_out.h)
+  #include "host_log.h"
+  #define DEBUG_SERIAL hostLog        // ring buffer -> LOG frames, pumped by the MIDI task (host_log.h)
 #else
   #define DEBUG_SERIAL Serial         // UART0
 #endif

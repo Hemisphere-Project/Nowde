@@ -1,5 +1,6 @@
 #include "host_link.h"
 
+#include "host_log.h"
 #include "midi_rx.h"
 #include "nowde_config.h"
 #include "nowde_state.h"   // hostResumed
@@ -11,6 +12,11 @@ constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE pay
 MidiRxParser<SYSEX_BUFFER_SIZE> rx;
 unsigned long lastHostRxTime = 0;
 }  // namespace
+
+void hostLinkInit() {
+  usbOutInit();
+  hostLogInit();
+}
 
 bool hostLinkSend(const uint8_t* bytes, size_t len) {
   if (!bytes || len == 0) {
@@ -36,6 +42,7 @@ void hostLinkUnlock() {
 
 void hostLinkPump() {
   usbOutPump();
+  hostLogPump();   // after the link's own pump, as before: its frames go out next pump
 }
 
 void hostLinkPoll(HostLinkSink& sink) {
