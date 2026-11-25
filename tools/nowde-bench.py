@@ -54,8 +54,6 @@ EVENT_CH = 0
 MS_RATE_HZ = 10
 SHOW_LAYER = 'nowde-bench'   # every show check runs here; take() moves the nodes, _restore() back
 WALK_LAYER = '*'             # the walk's far node is out of reach: the wildcard reaches any layer
-HOST_SILENCE_S = 5.5         # HOST_LINK_TIMEOUT_MS + margin: a master answers a linked host's probe
-                             # with its table, and HELLO only to a host that was quiet this long
 OTA_MAX_RESENDS = 50         # a node that acks late on every chunk: stop and say so, never crawl
 
 
@@ -286,17 +284,18 @@ class Port:
             time.sleep(0.02)
         return None
 
-    def hello(self, quiet_retry=True):
-        """QUERY_RUNNING_STATE, never QUERY_CONFIG (that one turns a legacy node into a sender).
-        A master answers a host it already hears from with its table only; HELLO comes once the
-        host was quiet HOST_SILENCE_S -- so no HELLO = go quiet that long and ask once more."""
+    def hello(self):
+        """QUERY_RUNNING_STATE first, never a bare QUERY_CONFIG (it turns a legacy node into a
+        sender). A sender -- a master, or a legacy node a host already turned -- answers a linked
+        host with its table only, and HPlayer2 polls every 2 s, so the link never drops (25/11,
+        B under bench-02's player: RUNNING_STATE, no HELLO). That table proves the node is a
+        sender already: QUERY_CONFIG then changes nothing and always answers HELLO."""
         mark = self.mark()
         self.send(nx.query_running_state())
         info = self.wait_for(nx.CMD_HELLO, 2.0, mark)
-        if not info and quiet_retry:
-            time.sleep(HOST_SILENCE_S)
+        if not info and self.wait_for(nx.CMD_RUNNING_STATE, 0.1, mark):
             mark = self.mark()
-            self.send(nx.query_running_state())
+            self.send(nx.query_config())
             info = self.wait_for(nx.CMD_HELLO, 2.0, mark)
         if info:
             self.info = info
@@ -625,7 +624,9 @@ def set_lr(pattern, mode, port=None, timeout=40.0):
         q = Port(pattern, wait_s=max(0.0, end - time.time()))   # the old port may still be listed
         info = q.hello()
         if info and booted_since(info, t_sent, time.time()):
-            return q, info.get('lr_mode')
+            # The boot HELLO leaves before setup() loads the stored mode (src/main.cpp): it says
+            # the build's default (25/11, B: up=1057 ms lr=off, then 2269 ms lr=250k). Ask again.
+            return q, (q.hello() or info).get('lr_mode')
         if time.time() < end:
             q.close()
             q = None

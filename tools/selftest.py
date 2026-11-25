@@ -450,6 +450,29 @@ nb._restore([fn, fw])
 check(fn.layer == '-' and fw.layer == 'garden' and not nb._layers_before, "restore: each node back on its own layer")
 check(nb.WALK_LAYER == '*', "walk streams on the wildcard: the far node is out of the tool's reach")
 
+
+
+class FakeSender(FakeNode):
+    """A sender under a host that polls: QUERY_RUNNING_STATE gets the table, QUERY_CONFIG HELLO."""
+
+    def send(self, payload):
+        self.sent.append(payload)
+        if payload[1] == nx.CMD_QUERY_RUNNING_STATE:
+            self.out += nx.running_state_chunks([])
+        elif payload[1] == nx.CMD_QUERY_CONFIG:
+            self.out += [nx.hello('2.4.0', role=1, board=2, sync_quality=2), nx.config_state(role=1, board=2, layer='-')]
+
+
+fs = FakeSender('26B8F8', '-')
+fs.info = {}
+hs = nb.Port.hello(fs)
+check(hs and hs['version'] == '2.4.0' and [m[1] for m in fs.sent] == [nx.CMD_QUERY_RUNNING_STATE, nx.CMD_QUERY_CONFIG],
+      "hello: a sender's table first, then QUERY_CONFIG (no side effect on a sender) for HELLO")
+fq = FakeNode('CD83FC', '-')
+fq.info = {}
+check(nb.Port.hello(fq) is None and [m[1] for m in fq.sent] == [nx.CMD_QUERY_RUNNING_STATE],
+      "hello: a silent node never gets QUERY_CONFIG (it would turn a legacy node into a sender)")
+
 # exit codes: 2 = could not run (no MIDI stack, no port), never 1 (= a node FAILed).
 _mido_real = nb._mido
 
