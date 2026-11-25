@@ -512,8 +512,8 @@ def cfg_int_hex(name):
 
 
 # 2.4: what the HELLO trailer, the version field and ESP-NOW's peer table hold, read from the C.
-check(cfg_int('NOWDE_HELLO_GEN') == 2 and cfg_int('NOWDE_NODE_ID_LEN') == nx.NODE_ID_LEN,
-      "nowde_config.h HELLO gen + node id match the codec")
+check(cfg_int('NOWDE_HELLO_GEN') == 3 and cfg_int('NOWDE_NODE_ID_LEN') == nx.NODE_ID_LEN,
+      "nowde_config.h HELLO gen (3 = Nowde 3) + node id match the codec")
 mv = re.search(r'^#define NOWDE_VERSION "([^"]*)"', cfg, re.M)
 check(mv and len(mv.group(1)) <= 7, f"NOWDE_VERSION fits the 8-byte NUL-terminated wire field ({mv and mv.group(1)})")
 check(cfg_int('MAX_SENDERS') + cfg_int('MAX_RECEIVERS') + 1 <= 20,

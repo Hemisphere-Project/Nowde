@@ -351,7 +351,7 @@
 // 2.4 HELLO trailer, after the build id: the protocol generation (2 = the 2.x line; Nowde 3
 // sends 3) and the node id, the MAC's last three bytes as 6 upper-case hex ASCII characters --
 // the same suffix as the USB name "Nowde - XXXXXX", so a host keys a node without its port name.
-#define NOWDE_HELLO_GEN 2
+#define NOWDE_HELLO_GEN 3   // Nowde 3 (#t-050 ④: the election is live, role 3 = standby)
 #define NOWDE_NODE_ID_LEN 6
 // 2.4: RSSI older than this reads as unknown (0): the master's 5 s "missing" mark.
 #define NOWDE_RSSI_STALE_MS 5000
