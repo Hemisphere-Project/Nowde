@@ -1167,6 +1167,9 @@ def cmd_led(a):
     return finish(report, a.report)
 
 
+SERIAL_BOOT_S = 3.0   # a DevKitC from reset to its first answer, with margin
+
+
 class SerialPort(Port):
     """A Nowde on a serial host link (`devkitc-uart`, `devkitc-cdc`, `m5stack-atom`): the same MIDI
     bytes at 921600 on a tty, parsed by mido into the messages a USB port gives."""
@@ -1217,9 +1220,14 @@ def cmd_serial(a):
     report = {'command': 'serial', 'checks': []}
     p = SerialPort(a.tty)
     try:
-        h = p.hello() or {}
+        h, retried = p.hello(), False
+        if not h:   # the open may still pulse a DevKitC's auto-reset (the tty raises DTR): one boot later, once
+            time.sleep(SERIAL_BOOT_S)
+            h, retried = p.hello(), True
+        h = h or {}
         check(report, f"{a.tty}: HELLO over the serial link", bool(h),
-              f"{h.get('version')} gen {h.get('gen')} board {h.get('board')}")
+              f"{h.get('version')} gen {h.get('gen')} board {h.get('board')}"
+              + (f" (after a {SERIAL_BOOT_S:.0f} s retry: the port open reset the node)" if retried and h else ''))
         p.send(nx.set_log(True))
         p.send(nx.claim())
         r = role_seen(p)
