@@ -40,7 +40,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `05` | OTA_BEGIN | `F0 7D 05 size(4→5) F7` | Any role, over the node's own USB only (2.0.3 dropped the sender gate; 2.4 refuses raw SysEx over the air but `0x11`). `size` = firmware length, big-endian u32. Starts an `Update` session on the app partition. |
 | `06` | OTA_DATA | `F0 7D 06 data(7-bit) F7` | Decoded chunk ≤ 256 bytes, written in order. Errors abort the session with `ERROR_REPORT`. |
 | `07` | OTA_END | `F0 7D 07 F7` | Verifies the received size, finalizes, reboots. *(2.4)* Answers with its verdict, `OTA_ACK 7F status dups` (below), and restarts 500 ms after a validated one — from the MIDI task once the verdict and the log are out, no longer a `delay(2000)` that froze that task, so a host saw only a port that vanished. |
-| `08` | SET_ROLE *(v2)* | `F0 7D 08 role(1) F7` | `0` slave, `1` master. Stored in NVS, applied on the spot. |
+| `08` | SET_ROLE *(v2)* | `F0 7D 08 role(1) F7` | `0` slave, `1` master. Stored in NVS, applied on the spot. *(Nowde 3)* `0` never a sender, `1` pinned master, `7F` auto = the election (§Nowde 3 election), the default on every board. |
 | `09` | SET_LOCAL_LAYER *(v2)* | `F0 7D 09 layer(raw ASCII ≤15) F7` | Sets *this* node's subscribed layer (the `0x11` command targets a remote slave). Stored in NVS. |
 | `0A` | SET_LOG *(v2)* | `F0 7D 0A on(1) F7` | `1`: stream the node's own log to the host as `LOG` frames; `0`: stop. Off at boot; the first `1` also delivers the boot log kept since power-up (8 KB). Not stored. Bench / journal aid: `nowde-cli watch` turns it on, HPlayer2 with `nowde-nodelog`. |
 | `0B` | SET_LR *(2.0.3)* | `F0 7D 0B mode(1) F7` | Long-range PHY switch. *(2.4)* `mode`: `0` off, `1` LR 250k (what 2.0.3's `on` meant, so a stored `1` keeps its meaning), `2` LR 500k; anything else answers `ERROR_REPORT 01`. Default stays off. Stored in NVS, then the node **restarts** to apply it (the protocol is set before the channel). All-or-nothing across the mesh. Answers `HELLO` before restarting. |
@@ -48,6 +48,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `0D` | SET_LOSS_POLICY *(v2.2)* | `F0 7D 0D stop(1) F7` | `1` stop, `0` freewheel, when the `MEDIA_SYNC` stream dies. Stored in NVS and applied **live** — no restart, unlike `SET_LR`. Answers `CONFIG_STATE`. Which one a node wants is a property of where it stands, so it stopped being a build flag. |
 | `70` | SET_NEIGHBOURS *(2.4, bench builds only)* | `F0 7D 70 [n × mac(6), 7-bit packed] F7`, n ≤ 8 | Only in builds with `-DNOWDE_BENCH_NEIGHBOURS` (envs `devkit-meshmask`, `atoms3-meshmask`): every ESP-NOW frame from a MAC not listed — the clock's `MCK` included — is dropped before dispatch, so three nodes on one desk play a relay chain. `n = 0` accepts everyone. RAM only; answers `HELLO`. Every other build answers `ERROR_REPORT 02` with the command byte as context. Never on an installation. |
 | `0E` | SET_ORIGIN *(v2.2)* | `F0 7D 0E [mac(6→7)] F7` | With a MAC: **pins** the origin lock to that master and holds it through any silence. Without one (`F0 7D 0E F7`, 4 bytes): releases the lock, and the next `MediaSyncPacket` heard adopts its sender. Answers `CONFIG_STATE`. Not stored — a lock is a live fact, not a config. |
+| `0F` | CLAIM *(Nowde 3)* | `F0 7D 0F F7` | A host claim: an auto or pinned node becomes the sender with a fresh term (§Nowde 3 election). `QUERY_CONFIG`, `PUSH_FULL_CONFIG` and the first `MEDIA_SYNC` after 5 s without one claim the same way. A role change answers an unsolicited `HELLO`. |
 | `13` | SET_LED *(Nowde 3)* | `F0 7D 13 pin(1) brightness(1) dark(1) F7` | This node's status pixel (a WS2812/SK6812): `pin` its GPIO, `7F` = no pixel; `brightness` `0`–`127` (default `16`: low); `dark` `1` = show-dark, the pixel stays off except for errors and an identify. Defaults per board: DevKitC-1 GPIO48 (a v1.1 board wants `38`), AtomS3 Lite 35, M5 Atom 27, a generic ESP32 none. Stored in NVS, applied live; answers `CONFIG_STATE`. A pin that is not an output, or the button's, answers `ERROR_REPORT 01`. For this node only — never relayed, though its id sits in the `0x10` range. |
 | `14` | IDENTIFY *(Nowde 3)* | `F0 7D 14 F7` | The pixel strobes white for 3 s, then blinks the hop count to the sender (none yet: the hop count arrives with the range work). Same as a short press on the button. No answer. For this node only — never relayed. |
 
@@ -88,7 +89,7 @@ native little-endian.
 | Type | Struct | Direction | Cadence |
 |------|--------|-----------|---------|
 | `MCK…` | `MeshClockPacket` (3-byte magic + 56-bit µs) | any → broadcast | ESPNowMeshClock, ~1 s ± 10 %. Handled first by `meshClock.handleReceive()`. |
-| `0x01` | `SenderBeacon { type }` | master → broadcast | 1 s. A slave registers the sender as a peer; sender entries time out after 5 s. |
+| `0x01` | `SenderBeacon { type }` | master → broadcast | 1 s. A slave registers the sender as a peer; sender entries time out after 5 s. *(Nowde 3)* 8 bytes: `type` + `gen(=3) pin(0/1) term(u16 LE) sub(u8) meshId(u16 LE)`, the sender's election rank. A 1-byte beacon (v1.2 / 2.x) is an external pinned master: a v3 node follows it and never competes. 2.x slaves read the type byte only. |
 | `0x02` | `ReceiverInfo { type, layer[16], version[8], mediaIndex }` *(2.0.1 appends `syncQuality u8`; v2.2 appends `syncGaps u16`; 2.4 appends `rssi i8`, dBm of the last frame straight from the slave's locked master, 0 = unknown)* | slave → each known master, unicast | 1 s + 0–200 ms jitter. The master marks a slave *missing* after 5 s and drops it after 10 s. |
 | `0x03` | `MediaSyncPacket { type, layer[16], mediaIndex u8, positionMs u32, state u8, meshTimestamp u32 }` — 27 B, *(2.0.4 appends `volume u8`, `flags u8` → 29 B; v2.2 appends `seq u16` → 31 B, **in that order**: 2.0.4 shipped first, so its offsets are fixed and `seq` goes after)* | master → **broadcast** *(v2.2 — it was one unicast per connected slave on the layer)* | on every host `MEDIA_SYNC`, i.e. ~10 Hz |
 | `0xF0…` | SysEx frame, mesh form of `CHANGE_RECEIVER_LAYER`: `F0 7D 11 layer(raw ASCII, unpadded) F7` | master → one slave | on demand. The slave stores the layer in NVS and re-announces itself. *(2.4)* The only SysEx a node runs from the air: a `0xF0` frame is executed only if it is `F0 7D 11 …` **and** comes from the master this slave is origin-locked to — or *(#t-053)* the slave is still on the factory `-`, follows no master yet, and the sender is a master whose beacon it heard: a `-` slave locks only on a master of its own layer, so without this it could never be given one (`src/air_sysex.h`). Anything else (OTA, `SET_ROLE`, `SET_LR`, config…) from anyone in earshot is dropped and logged; a master never takes a layer from the air. Before 2.4 any command ran. |
@@ -529,7 +530,22 @@ never fires, so a fleet switched off around it costs it one restart at most. The
 watchdog restart logs `[WATCHDOG] boot after watchdog restart #n: <reason>`; `bootReason` in
 `HELLO` is `SW` (3), the restart count rides in the `HELLO` trailer.
 
-## v2 role resolution (boot)
+## Nowde 3 election (nowde#t-050 ④, `src/election.{h,cpp}`)
+
+Replaces the v2 resolution below on every board. The host decides, the rank arbitrates:
+
+- A **host claim** (`CLAIM`, `QUERY_CONFIG`, `PUSH_FULL_CONFIG`, the first `MEDIA_SYNC` after 5 s
+  without one) makes an auto or pinned node the sender: term = the highest term heard + 1.
+- Rank = (pin, term, sub, MAC), compared in that order, the lower MAC winning a tie; two pins compare
+  by MAC alone and flag a pin conflict (the pixel). A sender hearing a better rank yields on that
+  beacon: **standby** (HELLO role `3`) while its host still drives, else slave.
+- A standby takes over after 3 s without the sender's beacon, its host still driving, and only with
+  **company**: a frame heard after the sender went quiet from a node that is no live sender. A sender's
+  own frames never count, so a standby cut off from everyone never claims.
+- An auto sender whose host has been silent 5 s stops sending; a pin keeps beaconing from boot.
+- Every role change pushes an unsolicited `HELLO` to the host.
+
+## v2 role resolution (boot) — 2.x builds
 
 1. `role` from NVS if it is 0 or 1 (`SET_ROLE` stores it).
 2. Else the build's `NOWDE_ROLE_DEFAULT` if forced (`atoms3-master` / `atoms3-slave` envs).
@@ -538,7 +554,7 @@ watchdog restart logs `[WATCHDOG] boot after watchdog restart #n: <reason>`; `bo
 
 A resolved **master** enables sender mode at boot and beacons immediately. A resolved
 **slave** never becomes a sender: `QUERY_CONFIG` / `PUSH_FULL_CONFIG` only answer.
-`HELLO` and `CONFIG_STATE` report the resolved role (0 slave, 1 master, 2 legacy) and
+`HELLO` and `CONFIG_STATE` report the resolved role (0 slave, 1 master, 2 legacy; Nowde 3: 3 standby, never 2) and
 the board id (1 devkit, 2 atoms3, 3 atoms3-lite; Nowde 3: 4 atom = M5 Atom Lite, 5 esp32 = a
 generic classic ESP32).
 

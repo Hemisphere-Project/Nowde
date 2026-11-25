@@ -52,6 +52,7 @@ const char* roleName() {
   switch (nodeRole) {
     case NOWDE_ROLE_MASTER: return "MASTER";
     case NOWDE_ROLE_SLAVE: return "SLAVE";
+    case NOWDE_ROLE_STANDBY: return "STANDBY";
     default: return "LEGACY";
   }
 }

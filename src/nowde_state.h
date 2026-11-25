@@ -107,6 +107,26 @@ bool originAccepts(const uint8_t* origin);
 void originRelease();
 // Apply a role (NOWDE_ROLE_SLAVE / MASTER / LEGACY) to the running node
 void applyRole(uint8_t resolvedRole);
+
+// Nowde 3 election (#t-050 ④): the node's one instance, and the role it resolves to.
+#include "election.h"
+// Touched from the MIDI task, the ESP-NOW task and the radio callback: only through these, which
+// hold a spinlock around the (pure, short) election calls.
+election::Mode electionModeFor(uint8_t storedRole);
+void electionBegin(uint8_t storedRole);
+void electionSetMode(uint8_t storedRole);
+void electionHostClaim();
+void electionHostMediaSync();
+void electionBeacon(const uint8_t mac[6], const election::Rank* rank);
+void electionHeard(const uint8_t mac[6]);
+void electionTick();
+election::Rank electionRank();
+bool electionPinConflict();
+bool electionStandby();
+uint8_t electionResolvedRole();  // NOWDE_ROLE_MASTER / _SLAVE / _STANDBY
+// Apply a role change the election made (if any): applyRole() + an unsolicited HELLO unless the
+// caller answers one itself (QUERY_CONFIG / PUSH_FULL_CONFIG).
+void electionApply(bool hello);
 // meshClock.meshMillis() with a guard against the library's torn 64-bit offset read
 // (another task slewing _offset while we read: the value comes back off by 2^32 us, seen on
 // the bench as "Delta=-4294966 ms"). Two consecutive reads must agree.

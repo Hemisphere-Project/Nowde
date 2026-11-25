@@ -142,13 +142,14 @@
 #define NOWDE_BOARDID_ESP32       5   // Nowde 3: a generic classic ESP32
 
 // ============= ROLE =============
-// Stored in NVS ("nowde"/"role"). AUTO = decide from the board at boot:
-//   AtomS3 (LCD)      -> master
-//   AtomS3 Lite (LED) -> slave
-//   DevKit / unknown  -> legacy: receiver at boot, sender when the host handshakes (v1.2)
+// Stored in NVS ("nowde"/"role"). Nowde 3 (#t-050 ④): SLAVE = never a sender, MASTER = pinned
+// master, AUTO = the election (src/election.h) on every board, the DevKit included. The resolved
+// role is what HELLO reports: 0 slave, 1 master (sending), 3 standby (a yielded sender whose host
+// still drives). 2 = legacy is what 2.x builds report; Nowde 3 never resolves to it.
 #define NOWDE_ROLE_SLAVE  0
 #define NOWDE_ROLE_MASTER 1
-#define NOWDE_ROLE_LEGACY 2         // resolved value only, never stored
+#define NOWDE_ROLE_LEGACY 2         // resolved value only, never stored (2.x builds)
+#define NOWDE_ROLE_STANDBY 3        // resolved value only, never stored (Nowde 3)
 #define NOWDE_ROLE_AUTO   0x7F
 #ifndef NOWDE_ROLE_DEFAULT
   #define NOWDE_ROLE_DEFAULT NOWDE_ROLE_AUTO
@@ -334,6 +335,7 @@
                                          // the decoded length matches, answered by OTA_ACK seq status (stop-and-wait)
 #define SYSEX_CMD_SET_LOSS_POLICY 0x0D   // v2.2: F0 7D 0D stop(0/1) F7 — freewheel vs stop on link loss, NVS, live
 #define SYSEX_CMD_SET_ORIGIN 0x0E        // v2.2: F0 7D 0E [mac(6) 7-bit → 7] F7 pins the origin lock; no mac = release it
+#define SYSEX_CMD_CLAIM 0x0F             // Nowde 3: F0 7D 0F F7 — the host claims this node as the sender (election)
 
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10

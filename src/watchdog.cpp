@@ -202,7 +202,7 @@ void watchdogTick(unsigned long now) {
   }
 
   // ---- slave: c. isolated
-  if (nodeRole == NOWDE_ROLE_SLAVE) {
+  if (nodeRole == NOWDE_ROLE_SLAVE || nodeRole == NOWDE_ROLE_STANDBY) {
     if (countActiveSenders() > 0) {
       hadSender = true;
       noSenderSince = 0;

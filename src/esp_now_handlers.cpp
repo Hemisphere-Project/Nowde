@@ -83,6 +83,15 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     masterRssiAt = millis();
   }
 
+  // Nowde 3 election (#t-050 ④): any frame (MCK included) from a node that is no live sender is
+  // COMPANY for the standby takeover. A sender's own 0x02/0x03/MCK never are: a powered-off
+  // sender's last frame can land after its last beacon, and would hand a standby cut off from
+  // everyone the role. A sender's entry expires SENDER_TIMEOUT_MS after its last beacon; a
+  // powered ex-sender counts from then on. Beacons feed the rank in the switch below.
+  if (data[0] != ESPNOW_MSG_SENDER_BEACON && !isKnownSender(info->src_addr)) {
+    electionHeard(info->src_addr);
+  }
+
   if (meshClock.handleReceive(info->src_addr, data, len)) {
     return;
   }
@@ -135,9 +144,16 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   }
 
   switch (msgType) {
-    case ESPNOW_MSG_SENDER_BEACON:
+    case ESPNOW_MSG_SENDER_BEACON: {
+      // A v3 beacon carries the sender's rank (§Wire contract); a 1-byte one (v1.2 / 2.x) is an
+      // external pinned master: followed, never competed with.
+      election::Rank rank;
+      uint16_t meshId = 0;  // admission (⑤) reads it; open mesh until then
+      bool v3 = election::decodeBeacon(data, static_cast<size_t>(len), info->src_addr, &rank, &meshId);
+      electionBeacon(info->src_addr, v3 ? &rank : nullptr);
       handleSenderBeacon(info);
       break;
+    }
 
     case ESPNOW_MSG_RECEIVER_INFO:
       if (senderModeEnabled) {

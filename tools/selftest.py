@@ -539,6 +539,11 @@ check(nx.set_led(48, 16, False) == [0x7D, 0x13, 48, 16, 0] and nx.identify() == 
       "SET_LED / IDENTIFY frames")
 check(nx.parse(nx.set_led(None, 200, True))
       == ('SET_LED', {'pin': None, 'brightness': 127, 'dark': True}), "SET_LED parses back, clamped")
+# (④) CLAIM and the standby role value, against the firmware's.
+check(cfg_int_hex('SYSEX_CMD_CLAIM') == nx.CMD_CLAIM and nx.claim() == [0x7D, 0x0F],
+      "nowde_config.h CLAIM id matches the codec")
+check(cfg_int('NOWDE_ROLE_STANDBY') == 3 and nx.ROLE_NAMES[3] == 'standby',
+      "HELLO role 3 = standby in the firmware and the codec")
 
 here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')

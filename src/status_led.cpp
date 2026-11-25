@@ -51,8 +51,10 @@ led::Inputs inputs(unsigned long now) {
   in.identifyStart = identifyAt;
   in.hops = 0;
   in.dark = dark;
-  in.pinConflict = false;
-  in.role = nodeRole == NOWDE_ROLE_MASTER ? led::Role::Sender : led::Role::Slave;
+  in.pinConflict = electionPinConflict();
+  in.role = nodeRole == NOWDE_ROLE_MASTER    ? led::Role::Sender
+            : nodeRole == NOWDE_ROLE_STANDBY ? led::Role::Standby
+                                             : led::Role::Slave;
   in.layerAssigned = strcmp(subscribedLayer, NOWDE_LAYER_UNASSIGNED) != 0;
   in.linkLost = mediaSyncState.linkLost;
   in.masterHeard = countActiveSenders() > 0;

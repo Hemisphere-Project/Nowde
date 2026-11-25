@@ -185,17 +185,12 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
 
   switch (command) {
     case SYSEX_CMD_QUERY_CONFIG:
-      // v1.2 handshake: a legacy node becomes a sender here. A resolved slave never does
-      // (its host only wants HELLO to learn the role); a master already is one.
-      if (!senderModeEnabled && nodeRole != NOWDE_ROLE_SLAVE) {
-        senderModeEnabled = true;
-        DEBUG_SERIAL.println("\n=== SENDER MODE ACTIVATED ===");
-        DEBUG_SERIAL.println("Received: QUERY_CONFIG (0x01)");
-        DEBUG_SERIAL.println("Status: Broadcasting ESP-NOW beacons");
-        DEBUG_SERIAL.println("=============================\n");
-      } else {
-        DEBUG_SERIAL.println("[QUERY_CONFIG] Received from host");
-      }
+      // The v1.2 handshake is a HOST CLAIM (Nowde 3 election, #t-050 ④): an auto or pinned node
+      // takes the sender role with a fresh term; a SET_ROLE 0 node never does. The HELLO below
+      // answers it, so no second (unsolicited) one.
+      DEBUG_SERIAL.println("[QUERY_CONFIG] Received from host: host claim");
+      electionHostClaim();
+      electionApply(false);
       
       // Always send HELLO first (so Bridge knows we're alive/ready)
       // then send current config state
@@ -208,13 +203,9 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
     case SYSEX_CMD_PUSH_FULL_CONFIG:
       // Format: F0 7D 02 [rfSimEnabled(1)] [rfSimMaxDelayHi(1)] [rfSimMaxDelayLo(1)] F7
       if (length >= 6) {
-        // Enable sender mode if not already active (never on a resolved slave)
-        if (!senderModeEnabled && nodeRole != NOWDE_ROLE_SLAVE) {
-          senderModeEnabled = true;
-          DEBUG_SERIAL.println("\n=== SENDER MODE ACTIVATED ===");
-          DEBUG_SERIAL.println("Received: PUSH_FULL_CONFIG (0x02)");
-          DEBUG_SERIAL.println("=============================\n");
-        }
+        // A host claim (election, #t-050 ④); sendConfigState below is the answer.
+        electionHostClaim();
+        electionApply(true);
         
         rfSimulationEnabled = data[3] != 0;
         // Decode from two 7-bit bytes (MIDI SysEx compatible)
@@ -434,7 +425,17 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
       }
       break;
 
+    case SYSEX_CMD_CLAIM:
+      // Nowde 3: F0 7D 0F F7 -- the host says "this node sends". Same as the handshake's claim.
+      electionHostClaim();
+      electionApply(true);
+      break;
+
     case SYSEX_CMD_MEDIA_SYNC:
+      // Every host MEDIA_SYNC keeps the host "driving"; the first after HOST_GONE_MS without one
+      // is a claim. A standby never re-claims on the stream itself (election.h).
+      electionHostMediaSync();
+      electionApply(true);
       if (senderModeEnabled && length >= 27) {
         char targetLayer[MAX_LAYER_LENGTH];
         memcpy(targetLayer, &data[3], MAX_LAYER_LENGTH);
@@ -638,7 +639,8 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
       break;
 
     case SYSEX_CMD_SET_ROLE:
-      // v2 — Format: F0 7D 08 [role] F7 ; role 0 = slave, 1 = master, 0x7F = auto (board decides)
+      // v2 — Format: F0 7D 08 [role] F7 ; role 0 = never a sender, 1 = pinned master,
+      // 0x7F = auto (Nowde 3: the election, every board)
       if (length >= 5) {
         uint8_t role = data[3];
         if (role != NOWDE_ROLE_SLAVE && role != NOWDE_ROLE_MASTER && role != NOWDE_ROLE_AUTO) {
@@ -795,14 +797,9 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
 void setStoredRole(uint8_t role) {
   storedRole = role;
   saveRoleToEEPROM(role);
-  uint8_t resolved = role;
-  if (role == NOWDE_ROLE_AUTO) {
-    resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
-             : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
-             : NOWDE_ROLE_LEGACY;
-  }
-  applyRole(resolved);
-  DEBUG_SERIAL.printf("[SET_ROLE] stored=%u resolved=%u\r\n", role, resolved);
+  electionSetMode(role);
+  electionApply(false);  // the HELLO below says it
+  DEBUG_SERIAL.printf("[SET_ROLE] stored=%u resolved=%u\r\n", role, nodeRole);
   sendHello();
   delay(50);
   sendConfigState();

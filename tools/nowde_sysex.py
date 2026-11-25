@@ -18,6 +18,7 @@ CMD_SET_LR = 0x0B
 CMD_OTA_DATA_ACKED = 0x0C
 CMD_SET_LOSS_POLICY = 0x0D
 CMD_SET_ORIGIN = 0x0E
+CMD_CLAIM = 0x0F            # Nowde 3: the host claims this node as the sender (election)
 CMD_MEDIA_SYNC = 0x10
 CMD_CHANGE_RECEIVER_LAYER = 0x11
 CMD_SET_LED = 0x13          # Nowde 3: this node's own pixel, not relayed despite the range
@@ -31,7 +32,7 @@ CMD_LOG = 0x31
 CMD_SET_NEIGHBOURS = 0x70   # 2.4 bench-only builds (-DNOWDE_BENCH_NEIGHBOURS)
 
 CMD_NAMES = {v: k[4:] for k, v in globals().items() if k.startswith('CMD_')}
-ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 0x7F: 'auto'}
+ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 3: 'standby', 0x7F: 'auto'}
 LR_MODES = {'off': 0, '250k': 1, '500k': 2}          # 2.4: SET_LR / HELLO `lr` (2.0.3: 0/1)
 LR_NAMES = {v: k for k, v in LR_MODES.items()}
 
@@ -180,6 +181,12 @@ def set_led(pin=None, brightness=16, dark=False):
 def identify():
     """Nowde 3: the pixel strobes white for 3 s, then blinks the hop count. No answer."""
     return [MANUFACTURER, CMD_IDENTIFY]
+
+
+def claim():
+    """Nowde 3: the host claims this node as the mesh sender (election, fresh term). Answered by
+    an unsolicited HELLO if the role changes."""
+    return [MANUFACTURER, CMD_CLAIM]
 
 
 def media_sync(layer, index, position_ms, playing, volume=None, flags=None):

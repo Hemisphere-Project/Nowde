@@ -226,6 +226,14 @@ void espnowTask(void* parameter) {
   for (;;) {
     unsigned long now = millis();
 
+    // Nowde 3 election: the MIDI-in master path (#t-016) is the host driving too -- its first
+    // transport-in after 5 s without a host is a claim, like MEDIA_SYNC's (proposal §5.2). Then
+    // the timeouts (standby takeover, host gone, stale sender), then any role change it made ->
+    // applyRole + an unsolicited HELLO.
+    if (hostClockActive()) electionHostMediaSync();
+    electionTick();
+    electionApply(true);
+
     // Sender mode operations
     if (senderModeEnabled) {
       if (now - lastSenderBeacon >= SENDER_BEACON_INTERVAL_MS) {
@@ -384,18 +392,15 @@ void setup() {
   delay(500);
 #endif
 
-  // Role: NVS override, else the board decides (see nowde_config.h)
+  // Role (Nowde 3, #t-050 ④): NVS says never / pinned / auto; the election resolves it, the same
+  // on every board. A pin sends from boot; auto and never start as slaves until a host claims.
   boardId = uiDetectBoard();
   storedRole = loadRoleFromEEPROM();
-  uint8_t resolved = storedRole;
-  if (storedRole == NOWDE_ROLE_AUTO) {
-    resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
-             : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
-             : NOWDE_ROLE_LEGACY;
-  }
+  electionBegin(storedRole);
+  uint8_t resolved = electionResolvedRole();
   nodeRole = resolved;  // applyRole() runs after ESP-NOW is up
   DEBUG_SERIAL.printf("[INIT] Board id %u, role stored %u -> %s\r\n", boardId, storedRole,
-                      resolved == NOWDE_ROLE_MASTER ? "MASTER" : resolved == NOWDE_ROLE_SLAVE ? "SLAVE" : "LEGACY");
+                      resolved == NOWDE_ROLE_MASTER ? "MASTER" : "SLAVE");
 
   statusLedInit();                // the boot flash starts here; the pixel follows the state from now
 

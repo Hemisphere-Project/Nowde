@@ -63,8 +63,13 @@ void sendSenderBeacon() {
     return;
   }
 
-  SenderBeacon beacon;
-  esp_err_t result = esp_now_send(broadcastAddress, reinterpret_cast<uint8_t*>(&beacon), sizeof(beacon));
+  // Nowde 3: the type byte + the election trailer (gen, pin, term, sub, meshId). 2.x slaves read
+  // the type byte only; a v1.2 / 2.x sender's 1-byte beacon is what a v3 node reads as legacy.
+  uint8_t beacon[1 + election::BEACON_TRAILER_LEN];
+  beacon[0] = ESPNOW_MSG_SENDER_BEACON;
+  election::Rank rank = electionRank();
+  size_t n = 1 + election::encodeTrailer(rank, 0 /* meshId: ⑤ */, beacon + 1);
+  esp_err_t result = esp_now_send(broadcastAddress, beacon, n);
   (void)result;
 
   // Beacon logging disabled for cleaner output

@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <esp_now.h>
+#include <esp_mac.h>
 
 #if NOWDE_USB_COMPOSITE
 USBCDC USBSerial(0);
@@ -192,6 +193,63 @@ bool originAccepts(const uint8_t* origin) {
   return false;
 }
 
+static election::Election nodeElection;
+static portMUX_TYPE electionMux = portMUX_INITIALIZER_UNLOCKED;
+#define ELECTION_LOCKED(stmt) do { portENTER_CRITICAL(&electionMux); stmt; portEXIT_CRITICAL(&electionMux); } while (0)
+
+election::Mode electionModeFor(uint8_t stored) {
+  if (stored == NOWDE_ROLE_SLAVE) return election::Mode::Never;
+  if (stored == NOWDE_ROLE_MASTER) return election::Mode::Pin;
+  return election::Mode::Auto;
+}
+
+void electionBegin(uint8_t stored) {
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  uint32_t now = millis();
+  ELECTION_LOCKED(nodeElection.begin(mac, electionModeFor(stored), now));
+}
+void electionSetMode(uint8_t stored) {
+  uint32_t now = millis();
+  ELECTION_LOCKED(nodeElection.setMode(electionModeFor(stored), now));
+}
+void electionHostClaim() { uint32_t now = millis(); ELECTION_LOCKED(nodeElection.hostClaim(now)); }
+void electionHostMediaSync() { uint32_t now = millis(); ELECTION_LOCKED(nodeElection.hostMediaSync(now)); }
+void electionBeacon(const uint8_t mac[6], const election::Rank* rank) {
+  uint32_t now = millis();
+  ELECTION_LOCKED(nodeElection.beacon(now, mac, rank));
+}
+void electionHeard(const uint8_t mac[6]) { uint32_t now = millis(); ELECTION_LOCKED(nodeElection.heard(now, mac)); }
+void electionTick() { uint32_t now = millis(); ELECTION_LOCKED(nodeElection.tick(now)); }
+election::Rank electionRank() { election::Rank r; ELECTION_LOCKED(r = nodeElection.rank()); return r; }
+bool electionPinConflict() { uint32_t now = millis(); bool c; ELECTION_LOCKED(c = nodeElection.pinConflict(now)); return c; }
+bool electionStandby() { bool s; ELECTION_LOCKED(s = nodeElection.role() == election::Role::Standby); return s; }
+
+static uint8_t resolvedRoleFor(election::Role r) {
+  return r == election::Role::Sender    ? NOWDE_ROLE_MASTER
+         : r == election::Role::Standby ? NOWDE_ROLE_STANDBY
+                                        : NOWDE_ROLE_SLAVE;
+}
+uint8_t electionResolvedRole() {
+  election::Role r;
+  ELECTION_LOCKED(r = nodeElection.role());
+  return resolvedRoleFor(r);
+}
+
+void sendHello();
+
+void electionApply(bool hello) {
+  bool changed;
+  election::Role r;
+  uint16_t term;
+  ELECTION_LOCKED(changed = nodeElection.takeRoleChange(); r = nodeElection.role(); term = nodeElection.rank().term);
+  if (!changed) return;
+  uint8_t resolved = resolvedRoleFor(r);
+  DEBUG_SERIAL.printf("[ELECTION] role %u -> %u (term %u)\r\n", nodeRole, resolved, term);
+  applyRole(resolved);
+  if (hello) sendHello();
+}
+
 void applyRole(uint8_t resolvedRole) {
   nodeRole = resolvedRole;
   switch (resolvedRole) {
@@ -199,6 +257,7 @@ void applyRole(uint8_t resolvedRole) {
       // Sender from boot: beacon right away so slaves lock the mesh before the host speaks.
       senderModeEnabled = true;
       break;
+    case NOWDE_ROLE_STANDBY:  // a yielded sender: follows like a slave until it takes over
     case NOWDE_ROLE_SLAVE:
       // Never a sender, whatever the host sends (QUERY_CONFIG only answers HELLO).
       if (senderModeEnabled) {
