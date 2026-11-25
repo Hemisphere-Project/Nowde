@@ -405,8 +405,19 @@ lines, ok = nb.summary({'command': 'x', 'checks': [{'name': 'a', 'pass': True}, 
 check(ok and lines[1].strip().startswith('INFO'), "summary: INFO never fails a run")
 lines, ok = nb.summary({'command': 'x', 'checks': [{'name': 'a', 'pass': True}, {'name': 'b', 'pass': False}]})
 check(not ok and lines[-1].startswith('FAIL'), "summary: one FAIL fails the run")
-for c in ('nodes', 'accept', 'drive', 'listen', 'lr', 'relay', 'ota', 'lr-set', 'walk'):
+for c in ('nodes', 'accept', 'drive', 'listen', 'lr', 'relay', 'ota', 'lr-set', 'walk',
+          'elect', 'claim', 'led', 'serial', 'soak'):
     check(f'nowde-bench {c} ' in nb.__doc__, f"nowde-bench documents `{c}`")
+
+# Nowde 3 (#t-050 ⑥): the soak's kernel reading, and the scenario / LED lists the desk is handed.
+kern = ['[ 7203.1] usb 1-1.3: urb status -32', '[ 7203.2] usb 1-1.3: urb status -32',
+        '[ 7300.0] usb 1-1.3: USB disconnect, device number 9', '[ 10.0] urb status -71']
+check(nb.kern_stalls(kern) == 2 and nb.kern_stalls([]) == 0, "soak: only `urb status -32` is the #t-032 stall")
+check(nb.hears_sync({'ms_since_sync': 120}) and not nb.hears_sync({'ms_since_sync': 0x3FFF})
+      and not nb.hears_sync(None), "elect mesh: a fresh MEDIA_SYNC is heard, 0x3FFF never")
+check(set(nb.ELECT_STEPS) == {'takeover', 'pin', 'legacy', 'mesh'}, "elect: four scenarios after the claims")
+check([s for s, _ in nb.LED_STEPS][-1] == 'restore' and len({s for s, _ in nb.LED_STEPS}) == len(nb.LED_STEPS),
+      "led: every state once, and it ends restored")
 
 # 25/11 rig run (#t-049 ⑥): the three defects the first hardware run found, pinned where pure.
 # lr-set: a HELLO counts only if the node booted after SET_LR (its own pre-restart HELLO already

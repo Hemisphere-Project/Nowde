@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["mido>=1.3", "python-rtmidi>=1.5"]
+# dependencies = ["mido>=1.3", "python-rtmidi>=1.5", "pyserial>=3.5"]
 # ///
 """nowde-bench — the 2.4 desk acceptance as one tool: every check writes a JSON report and ends
 on a one-screen PASS/FAIL summary (exit 0 = all PASS, 1 = a FAIL, 2 = could not run).
@@ -16,6 +16,16 @@ on a one-screen PASS/FAIL summary (exit 0 = all PASS, 1 = a FAIL, 2 = could not 
   nowde-bench ota --node P --image F [--inject-dup]        the hardened OTA; HELLO's build id must match the image
   nowde-bench lr-set --port P off|500k|250k                store an LR mode (the node restarts) and read it back
   nowde-bench walk --master P --lr off|500k|250k [--csv F] the range walk's logger: one CSV row per receiver per second
+
+Nowde 3 (HELLO gen 3):
+  nowde-bench elect --a P --b P [--legacy P] [--only S ...] one host: claims (last wins), the standby takeover,
+                                                           a pin, a 1-byte beacon (--legacy: a 2.x / v1.2 node),
+                                                           meshes 5 / 6 and an open node
+  nowde-bench claim --port P [--hold S]                    the rig's half: claim this node, read its role after S s
+  nowde-bench led --port P --pin N [--auto]                the pixel through its states, each with what to look for
+  nowde-bench serial --tty DEV                             a serial host link: HELLO, CLAIM, log frames (921600)
+  nowde-bench soak --usb P --tty DEV --hours H             #t-032 A/B: a USB-MIDI and a serial slave polled every
+                                                           10 s; `urb status -32` counted from the kernel log
 
 P = a regex on the MIDI port name (`CD83FC` picks `Nowde - CD83FC`). `--short` scales the show
 down for a smoke run. Two hosts (the rig, LR across hosts): `lr-set` on each, then `drive` on
@@ -945,6 +955,316 @@ def cmd_walk(a):
     return 0
 
 
+# ---- Nowde 3 (nowde#t-050 ⑥): election, admission, LED, serial link, the #t-032 A/B soak ----------
+
+ELECT_STEPS = ('takeover', 'pin', 'legacy', 'mesh')
+ROLE_SETTLE_S = 2.5        # yield within one beacon period (1 s) + the unsolicited HELLO, with margin
+TAKEOVER_S = 20.0          # host silent 5 s -> the sender stops; its entry times out 5 s; standby waits 3 s
+URB_STALL = re.compile(r'urb status -32')
+LED_STEPS = (   # (what the tool does, what to look for on the pixel) -- proposal §7, PROTOCOL.md
+    ('identify', 'white strobe 3 s, then the hop count (0 = one blink on a sender)'),
+    ('pin', 'blue: this node pinned as sender (SET_ROLE 1)'),
+    ('auto', 'blue while it still sends, standby = blue slow blink if another node took over'),
+    ('dark', 'off (show-dark), and identify still lights it'),
+    ('bright', 'the same state at brightness 64 of 127'),
+    ('restore', 'back to brightness 16, show-dark off'),
+)
+
+
+def kern_stalls(lines):
+    """Kernel log lines that are the #t-032 stall (TinyUSB MIDI IN halted): `urb status -32`."""
+    return sum(1 for ln in lines if URB_STALL.search(ln))
+
+
+def role_seen(port, timeout=ROLE_SETTLE_S):
+    """The node's role after `timeout`: the last unsolicited HELLO if one came, else a fresh one."""
+    mark = port.mark()
+    time.sleep(timeout)
+    last = None
+    for _, m in port.since(mark):
+        if m.type == 'sysex' and len(m.data) >= 2 and m.data[0] == nx.MANUFACTURER and m.data[1] == nx.CMD_HELLO:
+            last = nx.parse(list(m.data))[1]
+    return ((last or {}).get('role')) or ((port.hello() or {}).get('role'))
+
+
+def poll_host(ports, seconds):
+    """Keep each node's host link alive (HPlayer2 polls every 2 s) for `seconds`."""
+    end = time.time() + seconds
+    while time.time() < end:
+        for p in ports:
+            p.send(nx.query_running_state())
+        time.sleep(min(1.0, max(0.0, end - time.time())))
+
+
+def elect_claims(report, a, b):
+    """Host claims on A then B: the last claim wins, the first yields to standby (its host still drives)."""
+    a.send(nx.claim())
+    ra, rb = role_seen(a), (b.hello() or {}).get('role')
+    check(report, 'claim A: A sends', ra == 'master', f"A {ra}, B {rb}")
+    b.send(nx.claim())
+    poll_host([a], 0.5)
+    rb, ra = role_seen(b), role_seen(a, 0.5)
+    check(report, 'then claim B: the last claim wins', rb == 'master', f"B {rb}")
+    check(report, 'then claim B: A yields to standby', ra == 'standby', f"A {ra}")
+
+
+def elect_takeover(report, a, b_pattern):
+    """B sends, A standby; B's host goes silent (the caller closed B's port): B stops after 5 s,
+    A takes over after 3 s with company -- B's own slave frames, once B is no live sender.
+    Returns B's port, reopened: its host is back."""
+    end, ra = time.time() + TAKEOVER_S, None
+    t0 = time.time()
+    while time.time() < end:
+        a.send(nx.query_running_state())
+        ra = (a.hello() or {}).get('role')
+        if ra == 'master':
+            break
+        time.sleep(1.0)
+    check(report, "B's host silent: A takes over", ra == 'master', f"A {ra} after {time.time() - t0:.1f} s")
+    b = Port(b_pattern, wait_s=5.0)
+    rb = role_seen(b)
+    check(report, "B's host back: B stays standby or slave, never a second sender", rb in ('standby', 'slave'),
+          f"B {rb}")
+    return b
+
+
+def elect_pin(report, a, b):
+    """SET_ROLE 1 pins B: a fresh claim on A never beats a pin."""
+    b.send(nx.set_role('master'))
+    poll_host([a, b], 0.5)
+    a.send(nx.claim())
+    poll_host([b], 0.5)
+    ra, rb = role_seen(a), (b.hello() or {}).get('role')
+    check(report, 'B pinned, claim A: the pin keeps it', rb == 'master' and ra in ('standby', 'slave'),
+          f"A {ra}, B {rb}")
+    b.send(nx.set_role('auto'))
+
+
+def elect_legacy(report, a, legacy):
+    """A 2.x / v1.2 node made a sender beacons 1 byte: an external pin. A claimed v3 node follows it."""
+    legacy.send(nx.query_config())   # turns a legacy node into a sender, a 2.4 auto node too
+    poll_host([a, legacy], 2.0)
+    a.send(nx.claim())
+    ra = role_seen(a, 3.0)
+    check(report, 'a 1-byte beacon is a pin: a claimed v3 node never competes', ra in ('standby', 'slave'),
+          f"A {ra}, legacy {(legacy.hello() or {}).get('version')}")
+
+
+def elect_mesh(report, a, b):
+    """Meshes 5 and 6 side by side never hear each other; an open node hears both."""
+    take(a, 'slave')
+    take(b, 'master')
+    a.send(nx.set_mesh(5))
+    b.send(nx.set_mesh(6))
+    stream(b, 8.0)
+    h = a.hello() or {}
+    check(report, 'mesh 5 slave, mesh 6 master: A hears no sync, never locks',
+          not hears_sync(h) and h.get('sync_quality') != SYNC_LOCKED,
+          f"sync {h.get('sync_quality')}, {h.get('ms_since_sync')} ms since a MEDIA_SYNC")
+    a.send(nx.set_mesh(0))
+    stream(b, 8.0)
+    h = a.hello() or {}
+    check(report, 'A open: it hears mesh 6 and locks', hears_sync(h) and h.get('sync_quality') == SYNC_LOCKED,
+          f"sync {h.get('sync_quality')}, {h.get('ms_since_sync')} ms since a MEDIA_SYNC")
+    b.send(nx.set_mesh(0))
+
+
+def hears_sync(info, within_ms=2000):
+    """A HELLO says this node took a MEDIA_SYNC in the last `within_ms` (0x3FFF = never / >= 16.4 s)."""
+    ms = (info or {}).get('ms_since_sync')
+    return ms is not None and ms < within_ms
+
+
+def cmd_elect(a):
+    """One host, both nodes on it (the desk). Every node back to auto, mesh 0, its own layer after."""
+    report = {'command': 'elect', 'checks': []}
+    na, nb_ = Port(a.a), Port(a.b)
+    legacy = Port(a.legacy) if a.legacy else None
+    ports = [na, nb_] + ([legacy] if legacy else [])
+    try:
+        for p in ports:
+            check(report, f"{p.name}: answers HELLO", bool(p.hello()), f"gen {p.info.get('gen')}")
+        if any((p.info.get('gen') or 0) < 3 for p in (na, nb_)):
+            raise CouldNotRun('--a / --b must run Nowde 3 (HELLO gen 3)')
+        elect_claims(report, na, nb_)
+        if 'takeover' in a.only:
+            nb_.close()
+            nb_ = elect_takeover(report, na, a.b)
+        if 'pin' in a.only:
+            elect_pin(report, na, nb_)
+        if legacy and 'legacy' in a.only:
+            elect_legacy(report, na, legacy)
+        if 'mesh' in a.only:
+            elect_mesh(report, na, nb_)
+    finally:
+        ports = [na, nb_] + ([legacy] if legacy else [])
+        for p in ports:
+            p.send(nx.set_mesh(0))
+        _restore(ports)
+        for p in ports:
+            p.close()
+    return finish(report, a.report)
+
+
+def cmd_claim(a):
+    """The rig's half (one node per host): claim this node and report the role it settles in."""
+    report = {'command': 'claim', 'checks': []}
+    p = Port(a.port)
+    p.hello()
+    p.send(nx.claim())
+    r = role_seen(p)
+    check(report, f"{p.name}: claimed, sends", r == 'master', f"role {r}")
+    if a.hold:
+        poll_host([p], a.hold)
+        r = (p.hello() or {}).get('role')
+        check(report, f"{p.name}: after {a.hold:.0f} s", None, f"role {r} (standby = another host claimed later)")
+    p.send(nx.set_role('auto'))
+    p.close()
+    return finish(report, a.report)
+
+
+def cmd_led(a):
+    """Drives the pixel through its states; the desk reads each one (`--auto` never waits on Enter)."""
+    report = {'command': 'led', 'checks': []}
+    p = Port(a.port)
+    p.hello()
+    acts = {'identify': lambda: p.send(nx.identify()), 'pin': lambda: p.send(nx.set_role('master')),
+            'auto': lambda: p.send(nx.set_role('auto')), 'dark': lambda: (p.send(nx.set_led(a.pin, 16, True)),
+                                                                          p.send(nx.identify())),
+            'bright': lambda: p.send(nx.set_led(a.pin, 64, False)),
+            'restore': lambda: p.send(nx.set_led(a.pin, 16, False))}
+    try:
+        for step, look in LED_STEPS:
+            mark = p.mark()
+            acts[step]()
+            cs = p.wait_for(nx.CMD_CONFIG_STATE, 1.0, mark) if step in ('dark', 'bright', 'restore') else True
+            print(f"  {step:9} look for: {look}")
+            seen = None
+            if not a.auto:
+                seen = input('    as described? [y/n] ').strip().lower().startswith('y')
+            else:
+                time.sleep(4.0)
+            check(report, f"{p.name}: {step}", seen if cs else False, look if cs else 'no CONFIG_STATE answer')
+    finally:
+        p.send(nx.set_led(a.pin, 16, False))
+        p.send(nx.set_role('auto'))
+        p.close()
+    return finish(report, a.report)
+
+
+class SerialPort(Port):
+    """A Nowde on a serial host link (`devkitc-uart`, `devkitc-cdc`, `m5stack-atom`): the same MIDI
+    bytes at 921600 on a tty, parsed by mido into the messages a USB port gives."""
+
+    def __init__(self, path, baud=921600):
+        try:
+            import serial
+        except ImportError as e:
+            raise CouldNotRun(f"pyserial missing ({e})")
+        if not os.path.exists(path):
+            raise NoPort(f"no serial port {path}")
+        self.pattern = re.escape(path)
+        self.name = path
+        self.lock = threading.Lock()
+        self.msgs, self.mtc, self.logs = [], [], []
+        self.qf = [0] * 8
+        self.info = {}
+        self.tty = serial.Serial()
+        self.tty.port, self.tty.baudrate, self.tty.timeout = path, baud, 0.05
+        self.tty.dtr = self.tty.rts = False   # a DevKitC's auto-reset: opening must not reset the node
+        self.tty.open()
+        self._parser = _mido().Parser()
+        self._run = True
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        while self._run:
+            data = self.tty.read(256)
+            if data:
+                self._parser.feed(data)
+                for msg in self._parser:
+                    self._on(msg)
+
+    def close(self):
+        self._run = False
+        time.sleep(0.1)
+        self.tty.close()
+
+    def send(self, payload):
+        self.tty.write(bytes([0xF0] + list(payload) + [0xF7]))
+
+    def listed(self):
+        return os.path.exists(self.name)
+
+
+def cmd_serial(a):
+    """The serial link on one node: HELLO, the board, a CLAIM's HELLO back, the log as 0x31 frames."""
+    report = {'command': 'serial', 'checks': []}
+    p = SerialPort(a.tty)
+    try:
+        h = p.hello() or {}
+        check(report, f"{a.tty}: HELLO over the serial link", bool(h),
+              f"{h.get('version')} gen {h.get('gen')} board {h.get('board')}")
+        p.send(nx.set_log(True))
+        p.send(nx.claim())
+        r = role_seen(p)
+        check(report, f"{a.tty}: CLAIM answered, sends", r == 'master', f"role {r}")
+        check(report, f"{a.tty}: log frames arrive", p.log_count('.') > 0, f"{p.log_count('.')} lines")
+    finally:
+        p.send(nx.set_log(False))
+        p.send(nx.set_role('auto'))
+        p.close()
+    return finish(report, a.report)
+
+
+def answers(port, timeout=2.0):
+    """Any SysEx back for a QUERY_RUNNING_STATE: a sender answers its table, a slave its HELLO."""
+    mark = port.mark()
+    port.send(nx.query_running_state())
+    end = time.time() + timeout
+    while time.time() < end:
+        if any(m.type == 'sysex' and m.data and m.data[0] == nx.MANUFACTURER for _, m in port.since(mark)):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def cmd_soak(a):
+    """#t-032 A/B: one slave on USB-MIDI, one on a serial link, the same chip, `--hours`. Every 10 s
+    each is asked RUNNING_STATE; a miss is a stall on that link. The USB side also counts the kernel's
+    `urb status -32` lines; the serial side has no USB endpoint to stall."""
+    report = {'command': 'soak', 'checks': [], 'misses': {'usb': 0, 'serial': 0}}
+    usb, ser = Port(a.usb), SerialPort(a.tty)
+    for p in (usb, ser):
+        p.send(nx.set_role('slave'))
+    t_start = time.strftime('%Y-%m-%d %H:%M:%S')
+    end = time.time() + a.hours * 3600.0
+    try:
+        while time.time() < end:
+            for k, p in (('usb', usb), ('serial', ser)):
+                if not answers(p):
+                    report['misses'][k] += 1
+                    print(f"  {time.strftime('%H:%M:%S')} {k}: no answer ({report['misses'][k]})", flush=True)
+            time.sleep(10.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for p in (usb, ser):
+            p.send(nx.set_role('auto'))
+            p.close()
+    try:
+        kern = subprocess.run(['journalctl', '-k', '--since', t_start, '--no-pager'], capture_output=True,
+                              text=True, timeout=30).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        kern = None
+    report['kernel_stalls'] = kern_stalls(kern) if kern is not None else None
+    check(report, 'USB-MIDI slave: no unanswered poll', report['misses']['usb'] == 0, f"{report['misses']['usb']} missed")
+    check(report, 'serial slave: no unanswered poll', report['misses']['serial'] == 0, f"{report['misses']['serial']} missed")
+    check(report, 'kernel: urb status -32 lines', None,
+          'journalctl unreadable here' if kern is None else f"{report['kernel_stalls']} since {t_start}")
+    return finish(report, a.report)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='nowde-bench', description=__doc__.split('\n')[0])
     ap.add_argument('--report', default=None, help='JSON report path (default nowde-bench-<cmd>-<time>.json)')
@@ -989,12 +1309,32 @@ def main(argv=None):
     s.add_argument('--master', required=True)
     s.add_argument('--lr', choices=tuple(nx.LR_MODES), required=True)
     s.add_argument('--csv')
+    s = sub.add_parser('elect')
+    s.add_argument('--a', required=True)
+    s.add_argument('--b', required=True)
+    s.add_argument('--legacy', help='a 2.x / v1.2 node on this host: the 1-byte beacon check')
+    s.add_argument('--only', nargs='+', choices=ELECT_STEPS, default=list(ELECT_STEPS),
+                   help='after the claims, only these scenarios')
+    s = sub.add_parser('claim')
+    s.add_argument('--port', required=True)
+    s.add_argument('--hold', type=float, default=0.0)
+    s = sub.add_parser('led')
+    s.add_argument('--port', required=True)
+    s.add_argument('--pin', type=int, required=True, help='the pixel GPIO: 48 DevKitC-1, 35 AtomS3 Lite, 27 Atom')
+    s.add_argument('--auto', action='store_true', help='4 s per state, no prompt: the checks are INFO')
+    s = sub.add_parser('serial')
+    s.add_argument('--tty', required=True)
+    s = sub.add_parser('soak')
+    s.add_argument('--usb', required=True)
+    s.add_argument('--tty', required=True)
+    s.add_argument('--hours', type=float, default=4.0)
     a = ap.parse_args(argv)
     a.report = a.report or time.strftime(f'nowde-bench-{a.cmd}-%Y%m%d-%H%M%S.json')
     try:
         return {'nodes': cmd_nodes, 'accept': cmd_accept, 'drive': cmd_drive, 'listen': cmd_listen,
                 'lr': cmd_lr, 'relay': cmd_relay, 'ota': cmd_ota, 'lr-set': cmd_lr_set,
-                'walk': cmd_walk}[a.cmd](a)
+                'walk': cmd_walk, 'elect': cmd_elect, 'claim': cmd_claim, 'led': cmd_led,
+                'serial': cmd_serial, 'soak': cmd_soak}[a.cmd](a)
     except CouldNotRun as e:
         print(f"could not run: {e}", file=sys.stderr)
         return 2
