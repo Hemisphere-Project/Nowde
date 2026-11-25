@@ -546,16 +546,19 @@ cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
 # hand-rolled builders it replaced -- tools/usb_midi_packets_test.cpp, the same way; and the receive
 # parse, src/midi_rx.h, against the inline one it replaced -- tools/midi_rx_test.cpp; and (②) the
 # serial link's wire, node bytes back through the stream parser -- tools/serial_link_test.cpp; and
-# (③) the LED + button vocabulary, src/led_pattern.h -- tools/led_pattern_test.cpp.
+# (③) the LED + button vocabulary, src/led_pattern.h -- tools/led_pattern_test.cpp; and (④) the
+# election, src/election.{h,cpp} -- tools/election_test.cpp, built with the .cpp it tests.
+host_sources = {'election_test': ['election.cpp']}
 for host_test in ('midi_schedule_test', 'usb_midi_packets_test', 'midi_rx_test', 'serial_link_test',
-                  'led_pattern_test'):
+                  'led_pattern_test', 'election_test'):
     if not cxx:
         print(f"{host_test} SKIPPED: no host C++ compiler on PATH")
         continue
     with tempfile.TemporaryDirectory() as tmp:
         exe = os.path.join(tmp, host_test)
         build = subprocess.run([cxx, '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
-                                os.path.join(here, host_test + '.cpp')],
+                                os.path.join(here, host_test + '.cpp')]
+                               + [os.path.join(here, '..', 'src', f) for f in host_sources.get(host_test, [])],
                                capture_output=True, text=True)
         check(build.returncode == 0, f"{host_test} builds:\n{build.stderr}")
         run = subprocess.run([exe], capture_output=True, text=True)
