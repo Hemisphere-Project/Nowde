@@ -449,15 +449,26 @@ check(depth == 266, f"schedule depth is 266 records ({depth})")
 
 here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
+# #t-053: src/air_sysex.h, the rule for raw SysEx over the air, is the same kind of header and
+# runs the same way: tools/air_sysex_test.cpp.
+HOST_TESTS = ('midi_schedule_test', 'air_sysex_test')
 if not cxx:
-    print("midi_schedule host test SKIPPED: no host C++ compiler on PATH")
+    for name in HOST_TESTS:
+        print(f"{name.replace('_test', '')} host test SKIPPED: no host C++ compiler on PATH")
 else:
     with tempfile.TemporaryDirectory() as tmp:
-        exe = os.path.join(tmp, 'midi_schedule_test')
-        build = subprocess.run([cxx, '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
-                                os.path.join(here, 'midi_schedule_test.cpp')],
-                               capture_output=True, text=True)
-        check(build.returncode == 0, f"midi_schedule_test builds:\n{build.stderr}")
-        run = subprocess.run([exe], capture_output=True, text=True)
-        check(run.returncode == 0, f"midi_schedule_test:\n{run.stdout}{run.stderr}")
-        print(run.stdout.strip())
+        for name in HOST_TESTS:
+            exe = os.path.join(tmp, name)
+            build = subprocess.run([cxx, '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
+                                    os.path.join(here, f'{name}.cpp')],
+                                   capture_output=True, text=True)
+            check(build.returncode == 0, f"{name} builds:\n{build.stderr}")
+            run = subprocess.run([exe], capture_output=True, text=True)
+            check(run.returncode == 0, f"{name}:\n{run.stdout}{run.stderr}")
+            print(run.stdout.strip())
+
+# The firmware calls that header, and nothing else decides: the recv callback asks it before any
+# over-the-air SysEx runs.
+handlers = open(os.path.join(here, '..', 'src', 'esp_now_handlers.cpp')).read()
+check('airSysExVerdict(layerCommand, node, from)' in handlers and 'if (!airSysExRuns(verdict))' in handlers,
+      "esp_now_handlers.cpp runs raw SysEx from the air only on src/air_sysex.h's verdict")
