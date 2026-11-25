@@ -46,20 +46,22 @@ uint8_t loadRoleFromEEPROM() {
 
 // 2.0.3: long-range PHY is a stored switch, not a build. Absent key = the build's default
 // (NOWDE_WIFI_LR), so the `atoms3-lr` env still means "LR unless told otherwise".
-void saveLrToEEPROM(bool on) {
+// 2.4: the key holds the mode (NOWDE_LR_*). 2.0.3 stored 0/1 and 1 was 250k, so a stored 1 keeps
+// its meaning; anything unknown reads as 250k (on), the safer guess for an LR-installed node.
+void saveLrToEEPROM(uint8_t mode) {
   preferences.begin("nowde", false);
-  preferences.putUChar("lr", on ? 1 : 0);
+  preferences.putUChar("lr", mode);
   preferences.end();
-  DEBUG_SERIAL.printf("[EEPROM] LR saved: %u\r\n", on ? 1 : 0);
+  DEBUG_SERIAL.printf("[EEPROM] LR saved: %u\r\n", mode);
 }
 
-bool loadLrFromEEPROM() {
+uint8_t loadLrFromEEPROM() {
   if (!preferences.begin("nowde", true)) {
-    return NOWDE_WIFI_LR != 0;
+    return NOWDE_WIFI_LR;
   }
-  uint8_t v = preferences.getUChar("lr", NOWDE_WIFI_LR ? 1 : 0);
+  uint8_t v = preferences.getUChar("lr", NOWDE_WIFI_LR);
   preferences.end();
-  return v != 0;
+  return v > NOWDE_LR_500K ? NOWDE_LR_250K : v;
 }
 
 // v2.2: freewheel vs stop on link loss is a stored choice, not a build. Absent key = the build's

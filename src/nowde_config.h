@@ -12,11 +12,19 @@
 // 2.0.1: sync hardening — media delivery decoupled from the mesh-clock gate (a stuck clock
 // no longer freezes playback), active mesh re-sync + reboot self-heal, honest per-node lock
 // signal. On-wire via HELLO so a flashed unit is identifiable. See docs/BENCH.md / the pass notes.
-#define NOWDE_VERSION "2.0.5"
+// 2.4: the rc is spelled `2.4-rc1`, not `2.4.0-rc1`. The version field is 8 bytes on the wire,
+// frozen since v1.2 (HELLO version(8), ReceiverInfo/RUNNING_STATE version[8], the latter
+// NUL-terminated at [7]), so it holds 7 characters: `2.4.0-rc1` would read `2.4.0-r` on a
+// master's slave list. The build id (HELLO [26..35]) is what names the exact image.
+#define NOWDE_VERSION "2.4-rc1"
 #define MAX_LAYER_LENGTH 16
 #define MAX_VERSION_LENGTH 8
-#define MAX_SENDERS 10
-#define MAX_RECEIVERS 10
+// 2.4: 4 + 15, was 10 + 10. Every table entry is an ESP-NOW peer and so is the broadcast
+// address, and ESP-NOW holds 20 unencrypted peers: 10 + 10 + 1 = 21 made the last add fail
+// silently. A room has one master, two during a hand-over (#t-022), so 4 senders is headroom;
+// the receivers are what grows (the garden fleet is 6, a bench desk 3). 4 + 15 + 1 = 20.
+#define MAX_SENDERS 4
+#define MAX_RECEIVERS 15
 #define RECEIVER_TIMEOUT_MS 5000
 #define SENDER_TIMEOUT_MS 5000
 #define RECEIVER_BEACON_INTERVAL_MS 1000
@@ -87,9 +95,11 @@
   #define NOWDE_WIFI_LR 0
 #endif
 // 250K trades throughput we do not need for the most link budget; 500K is the milder step.
-#ifndef NOWDE_LR_RATE
-  #define NOWDE_LR_RATE WIFI_PHY_RATE_LORA_250K
-#endif
+// 2.4: the rate is part of the stored switch, no longer a build constant: SET_LR / HELLO `lr`
+// read 0 off, 1 LR 250k (what 2.0.3's `on` meant, so a stored 1 keeps its meaning), 2 LR 500k.
+#define NOWDE_LR_OFF  0
+#define NOWDE_LR_250K 1
+#define NOWDE_LR_500K 2
 // v2.2: MEDIA_SYNC is ONE broadcast frame, always. It used to be one unicast per slave,
 // pre-filtered by the master's receiver table, then (2.0.3) a build flag. Receivers already
 // filter on the packet's layer, so this needs no receiver change -- measured on the bench
@@ -200,6 +210,13 @@
   #define NOWDE_FREEWHEEL_MAX_MS 180000UL
 #endif
 
+// ============= HOST MIDI IN (v2.1, master) =============
+#define HOST_MIDI_SYNC_INTERVAL_MS 100      // MediaSync cadence while the host clock runs
+#define HOST_MIDI_IDLE_INTERVAL_MS 1000     // ... while stopped
+#define HOST_MIDI_MTC_TIMEOUT_MS 250        // no quarter-frame for this long = MTC stopped
+#define HOST_MIDI_SYSEX_PRIORITY_MS 2000    // SysEx MEDIA_SYNC seen within this window wins
+#define MTC_QF_LAG_FRAMES 2                 // an 8-piece QF sequence spans two frames
+
 // ============= HOST LINK =============
 // A host is considered linked while it has sent us anything within this window
 // (HPlayer2 polls QUERY_RUNNING_STATE every 2 s as a keepalive; the Bridge every 1 s).
@@ -226,7 +243,8 @@
 #define SYSEX_CMD_SET_ROLE 0x08          // v2: F0 7D 08 role F7 (0 slave, 1 master, 7F auto)
 #define SYSEX_CMD_SET_LOCAL_LAYER 0x09   // v2: F0 7D 09 layer(ascii) F7 — this node's own layer
 #define SYSEX_CMD_SET_LOG 0x0A           // v2: F0 7D 0A on(1) F7 — stream the node log as LOG frames
-#define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B on(0/1) F7 — store the LR switch in NVS, HELLO, restart
+#define SYSEX_CMD_SET_LR 0x0B            // 2.0.3: F0 7D 0B mode F7 — store the LR switch in NVS, HELLO, restart
+                                         // 2.4: mode 0 off, 1 LR 250k, 2 LR 500k (NOWDE_LR_*)
 #define SYSEX_CMD_OTA_DATA_ACKED 0x0C    // 2.0.3: F0 7D 0C seq(7-bit) len(raw bytes) [data 7-bit] F7 — written only if
                                          // the decoded length matches, answered by OTA_ACK seq status (stop-and-wait)
 #define SYSEX_CMD_SET_LOSS_POLICY 0x0D   // v2.2: F0 7D 0D stop(0/1) F7 — freewheel vs stop on link loss, NVS, live
@@ -238,9 +256,32 @@
 
 // Nowde → Bridge Responses (0x20-0x3F)
 #define SYSEX_CMD_HELLO 0x20
+// v2.1 HELLO trailer: how many bytes of the app ELF SHA-256 (esp_app_desc_t.app_elf_sha256)
+// HELLO carries as the build identity. 8 bytes = 16 hex, a short sha for a fleet of tens.
+#define NOWDE_BUILD_ID_LEN 8
+// 2.4 HELLO trailer, after the build id: the protocol generation (2 = the 2.x line; Nowde 3
+// sends 3) and the node id, the MAC's last three bytes as 6 upper-case hex ASCII characters --
+// the same suffix as the USB name "Nowde - XXXXXX", so a host keys a node without its port name.
+#define NOWDE_HELLO_GEN 2
+#define NOWDE_NODE_ID_LEN 6
+// 2.4: RSSI older than this reads as unknown (0): the master's 5 s "missing" mark.
+#define NOWDE_RSSI_STALE_MS 5000
+// 2.4 bench-only (#t-040's relay check on a desk): SET_NEIGHBOURS F0 7D 70 [n x MAC, 7-bit
+// packed] F7. Builds with -DNOWDE_BENCH_NEIGHBOURS drop every ESP-NOW frame (MCK included)
+// from a MAC not listed, before dispatch; an empty list accepts all; RAM only. Every other
+// build answers ERROR_REPORT 02, so a release unit can never be talked into a mask.
+#define SYSEX_CMD_SET_NEIGHBOURS 0x70
+#define NOWDE_MAX_NEIGHBOURS 8
 #define SYSEX_CMD_CONFIG_STATE 0x21
 #define SYSEX_CMD_RUNNING_STATE 0x22
 #define SYSEX_CMD_OTA_ACK 0x23
+// 2.4 (#t-046): OTA_END's verdict rides OTA_ACK with this seq: F0 7D 23 7F status dupHi dupLo F7.
+// Chunk acks keep status 0..3 (ok, bad length, write failed, no session).
+#define OTA_ACK_SEQ_END 0x7F
+#define OTA_END_NO_SESSION 3
+#define OTA_END_VALIDATED 4
+#define OTA_END_SIZE_MISMATCH 5
+#define OTA_END_INVALID 6
 #define SYSEX_CMD_ERROR_REPORT 0x30
 #define SYSEX_CMD_LOG 0x31               // v2: F0 7D 31 text(ascii) F7 — one log line, after SET_LOG 1
 
@@ -257,7 +298,7 @@
 #define ESPNOW_MSG_RECEIVER_INFO 0x02
 #define ESPNOW_MSG_MEDIA_SYNC 0x03
 #define ESPNOW_MSG_MIDI_EVENT 0x04       // v2.3: byte layout FROZEN in docs/PROTOCOL.md "The v2.3
-                                         // event frame", not yet implemented (#t-037 builds it).
+                                         // event frame", built by #t-037 (midi_event.cpp).
                                          // 30-byte header + N x 7-byte records, <= 14 new + <= 14
                                          // carried, <= 226 B so it survives the 0x05 envelope.
                                          // Locate record 0 at hdrLen and stride by recLen -- never
@@ -296,11 +337,14 @@ struct ReceiverInfo {
   uint16_t syncGaps;    // v2.2 trailer: MEDIA_SYNC frames this slave never received, counted
                         // from gaps in the master's `seq`. Broadcast has no MAC ACK, so this
                         // IS the silent-slave detector `espnowTxFail` used to be. Saturates.
+  int8_t rssi;          // 2.4 trailer: dBm of the last frame this slave heard straight from its
+                        // locked master; 0 = unknown (none heard for 5 s, or never).
 } __attribute__((packed));
 // Wire-compat: every field above is appended, so each generation has its own floor and a
 // shorter packet is read for what it carries (see handleReceiverInfo) rather than dropped.
 #define RECEIVER_INFO_MIN_LEN     ((int)offsetof(ReceiverInfo, syncQuality))  // pre-2.0.1
 #define RECEIVER_INFO_QUALITY_LEN ((int)offsetof(ReceiverInfo, syncGaps))     // 2.0.1..2.0.3
+#define RECEIVER_INFO_GAPS_LEN    ((int)offsetof(ReceiverInfo, rssi))         // v2.2..2.3
 
 struct MediaSyncPacket {
   uint8_t type = ESPNOW_MSG_MEDIA_SYNC;
@@ -453,6 +497,7 @@ struct ReceiverEntry {
   uint8_t mediaIndex;   // Current playing media index (0 = stopped)
   uint8_t syncQuality = NOWDE_SYNC_UNKNOWN;  // 2.0.1: last reported by the slave (NOWDE_SYNC_*)
   uint16_t syncGaps = 0;                     // v2.2: MEDIA_SYNC frames this slave says it missed
+  int8_t rssi = 0;                           // 2.4: dBm the slave reports for its master (0 unknown)
 };
 
 // v2.2 ORIGIN LOCK (slave side). Which master this node follows, and when it was last heard.
@@ -486,6 +531,7 @@ struct MediaSyncState {
   unsigned long lastSyncTime = 0;
   unsigned long localClockStartTime = 0;  // When local clock started running
   unsigned long lastMTCUpdateTime = 0;    // Last MTC send time
+  uint32_t mtcNextDueUs = 0;              // 2.4: micros() the next MTC frame is due (true 30/s)
   bool linkLost = false;
   bool stopOnLinkLost = NOWDE_STOP_ON_LINK_LOST;  // build-time, see NOWDE_STOP_ON_LINK_LOST
   uint8_t lastSentIndex = 255;

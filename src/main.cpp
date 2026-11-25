@@ -24,6 +24,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
 #include <esp_mac.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -41,6 +42,7 @@
 #include "ui.h"
 #include "usb_out.h"
 #include "watchdog.h"
+#include "host_clock.h"
 
 // Task handles for multi-core operation
 TaskHandle_t midiTaskHandle = NULL;
@@ -108,6 +110,11 @@ void logDeviceInfo() {
   DEBUG_SERIAL.println(WiFi.macAddress());
   DEBUG_SERIAL.print("Version: ");
   DEBUG_SERIAL.println(NOWDE_VERSION);
+  DEBUG_SERIAL.print("Build: ");            // v2.1: the HELLO buildId, as hex
+  for (int i = 0; i < NOWDE_BUILD_ID_LEN; i++) {
+    DEBUG_SERIAL.printf("%02x", esp_app_get_description()->app_elf_sha256[i]);
+  }
+  DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("================================");
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("Waiting for USB MIDI commands...");
@@ -274,10 +281,19 @@ void espnowTask(void* parameter) {
         unsigned long localElapsed = now - mediaSyncState.localClockStartTime;
         uint32_t currentPositionMs = mediaSyncState.currentPositionMs + localElapsed;
 
-        // Send MTC at configured framerate
-        if (now - mediaSyncState.lastMTCUpdateTime >= (1000 / MTC_FRAMERATE)) {
+        // Send MTC at configured framerate. 2.4: scheduled by frame, not by `now` -- this loop
+        // ticks every 10 ms, so `last = now` against a 33 ms period fired every 40 ms (25/s).
+        // The next due time advances by one frame period in microseconds; a stall longer than a
+        // frame re-anchors on now instead of bursting to catch up.
+        const uint32_t mtcPeriodUs = 1000000UL / MTC_FRAMERATE;
+        uint32_t nowUs = micros();
+        if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
           midiSendTimeCode(currentPositionMs);
           mediaSyncState.lastMTCUpdateTime = now;
+          mediaSyncState.mtcNextDueUs += mtcPeriodUs;
+          if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
+            mediaSyncState.mtcNextDueUs = nowUs + mtcPeriodUs;
+          }
         }
       }
 
@@ -306,6 +322,7 @@ void espnowTask(void* parameter) {
     watchdogTick(now);
 
     meshClock.loop();
+    hostClockTick();   // v2.1: MIDI-in master path
     uiTick();
     vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
   }
@@ -378,14 +395,15 @@ void setup() {
   // 2.0.3: LR is a stored switch (SET_LR 0x0B -> NVS -> restart), no longer a build. LR-only
   // PHY must be set after the interface is up and before the channel, and every node on the
   // mesh needs the same setting or it simply will not see the others (all-or-nothing).
-  lrEnabled = loadLrFromEEPROM();
+  lrMode = loadLrFromEEPROM();
+  lrEnabled = lrMode != NOWDE_LR_OFF;
   if (lrEnabled) {
     esp_err_t lrErr = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
     if (lrErr != ESP_OK) DEBUG_SERIAL.printf("[LR] set_protocol FAILED: %s\r\n", esp_err_to_name(lrErr));
   }
   esp_wifi_set_channel(NOWDE_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   DEBUG_SERIAL.printf("[INIT] WiFi STA mode configured, channel %d%s\r\n", NOWDE_WIFI_CHANNEL,
-                      lrEnabled ? " [LR]" : "");
+                      lrMode == NOWDE_LR_500K ? " [LR 500k]" : lrEnabled ? " [LR 250k]" : "");
   // v2.2: the policy is a stored choice (SET_LOSS_POLICY), so the LIVE value is the one worth
   // printing — printing the build flag here would now be a lie on any node a host has set.
   // Still printed on every boot so it is checkable on site without reading the binary.

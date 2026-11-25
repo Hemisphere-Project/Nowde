@@ -47,6 +47,8 @@ void sendReceiverInfo() {
   // v2.2: and how many MEDIA_SYNC frames we never got. Under broadcast this is what tells the
   // master a slave is half-deaf -- it hears this node's beacons either way.
   info.syncGaps = mediaSyncState.syncGaps;
+  // 2.4: how loud the master is here (dBm, 0 unknown) -- the master lists it per slave.
+  info.rssi = currentMasterRssi();
 
   for (int i = 0; i < MAX_SENDERS; i++) {
     if (senderTable[i].active) {

@@ -14,6 +14,8 @@ CMD_OTA_END = 0x07
 CMD_SET_ROLE = 0x08
 CMD_SET_LOCAL_LAYER = 0x09
 CMD_SET_LOG = 0x0A
+CMD_SET_LR = 0x0B
+CMD_OTA_DATA_ACKED = 0x0C
 CMD_SET_LOSS_POLICY = 0x0D
 CMD_SET_ORIGIN = 0x0E
 CMD_MEDIA_SYNC = 0x10
@@ -21,14 +23,38 @@ CMD_CHANGE_RECEIVER_LAYER = 0x11
 CMD_HELLO = 0x20
 CMD_CONFIG_STATE = 0x21
 CMD_RUNNING_STATE = 0x22
+CMD_OTA_ACK = 0x23
 CMD_ERROR_REPORT = 0x30
 CMD_LOG = 0x31
+CMD_SET_NEIGHBOURS = 0x70   # 2.4 bench-only builds (-DNOWDE_BENCH_NEIGHBOURS)
 
 CMD_NAMES = {v: k[4:] for k, v in globals().items() if k.startswith('CMD_')}
 ROLE_NAMES = {0: 'slave', 1: 'master', 2: 'legacy', 0x7F: 'auto'}
+LR_MODES = {'off': 0, '250k': 1, '500k': 2}          # 2.4: SET_LR / HELLO `lr` (2.0.3: 0/1)
+LR_NAMES = {v: k for k, v in LR_MODES.items()}
+
+
+def set_lr(mode):
+    """2.4: 'off' | '250k' | '500k' (or 0/1/2). The node stores it and restarts."""
+    code = LR_MODES[mode] if isinstance(mode, str) else int(mode)
+    assert code in LR_NAMES
+    return [MANUFACTURER, CMD_SET_LR, code]
+
+
+def set_neighbours(macs=()):
+    """2.4 bench-only: the MACs a meshmask node may hear (bytes or 'AA:BB:..'); () = everyone."""
+    raw = []
+    for m in macs:
+        raw += list(bytes.fromhex(m.replace(':', ''))) if isinstance(m, str) else list(m)
+    assert len(raw) % 6 == 0 and len(raw) <= 48
+    return [MANUFACTURER, CMD_SET_NEIGHBOURS] + encode7(raw)
 BOARD_NAMES = {0: 'unknown', 1: 'devkit', 2: 'atoms3', 3: 'atoms3-lite'}
 ERROR_NAMES = {0x01: 'CONFIG_INVALID', 0x02: 'SYSEX_PARSE_ERROR', 0x03: 'ESPNOW_SEND_FAILED',
                0x04: 'MESH_CLOCK_LOST_SYNC', 0x05: 'RECEIVER_TIMEOUT', 0xFF: 'UNKNOWN'}
+# 2.4 (#t-046): OTA_END's verdict rides OTA_ACK with seq 0x7F (src/nowde_config.h).
+OTA_ACK_SEQ_END = 0x7F
+OTA_CHUNK_STATUS = {0: 'ok', 1: 'bad-length', 2: 'write-failed', 3: 'no-session'}
+OTA_END_STATUS = {3: 'no-session', 4: 'validated', 5: 'size-mismatch', 6: 'invalid'}
 RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT', 7: 'WDT',
                  8: 'DEEPSLEEP', 9: 'BROWNOUT', 10: 'SDIO', 11: 'USB', 12: 'JTAG',
                  13: 'EFUSE', 14: 'PWR_GLITCH', 15: 'CPU_LOCKUP'}
@@ -37,6 +63,25 @@ RESET_REASONS = {1: 'POWERON', 3: 'SW', 4: 'PANIC', 5: 'INT_WDT', 6: 'TASK_WDT',
 # and does nothing yet: the firmware reads it into MediaSyncPacket.flags and acts on bit0 only.
 MEDIASYNC_FLAG_VOLUME = 0x01
 MEDIASYNC_FLAG_MUTE = 0x02
+
+
+NODE_ID_LEN = 6           # 2.4: HELLO's node id, the MAC's last 3 bytes as hex ASCII (NOWDE_NODE_ID_LEN)
+BUILD_ID_LEN = 8          # v2.1: HELLO carries this many bytes of the app ELF SHA-256 (NOWDE_BUILD_ID_LEN)
+APP_DESC_MAGIC = 0xABCD5432
+APP_IMAGE_OFFSET = 0x10000  # where the app sits in a merged (bootloader + partitions + app) image
+
+
+def bin_build_id(image):
+    """The build identity a firmware image will report in HELLO, read without flashing it: the
+    head of `esp_app_desc_t.app_elf_sha256`, at +0x90 into the app descriptor, which opens the
+    first segment (image header 24 B + segment header 8 B = 0x20) -> file offset 0xB0. `image` =
+    bytes of an app .bin (bin/firmware-*.bin) or of a merged image. None if no descriptor."""
+    for base in (0, APP_IMAGE_OFFSET):
+        desc = base + 0x20
+        if (len(image) >= desc + 0x90 + BUILD_ID_LEN and image[base] == 0xE9
+                and int.from_bytes(image[desc:desc + 4], 'little') == APP_DESC_MAGIC):
+            return bytes(image[desc + 0x90:desc + 0x90 + BUILD_ID_LEN]).hex()
+    return None
 
 
 def encode7(raw):
@@ -151,13 +196,31 @@ def ota_end():
     return [MANUFACTURER, CMD_OTA_END]
 
 
+def ota_data_acked(seq, chunk):
+    """2.0.3 stop-and-wait chunk: seq 0..127, raw length 1..100, then the 7-bit data."""
+    chunk = list(chunk)
+    assert 0 < len(chunk) <= 100
+    return [MANUFACTURER, CMD_OTA_DATA_ACKED, seq & 0x7F, len(chunk)] + encode7(chunk)
+
+
+def ota_ack(seq, status, duplicates=None):
+    """Node -> host. A chunk ack (6 bytes on the wire), or with `duplicates` the 2.4 END verdict."""
+    out = [MANUFACTURER, CMD_OTA_ACK, seq & 0x7F, status & 0x7F]
+    if duplicates is not None:
+        d = min(duplicates, 0x3FFF)
+        out += [(d >> 7) & 0x7F, d & 0x7F]
+    return out
+
+
 # ---- node -> host -----------------------------------------------------------------
 
 def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_quality=None,
-          lr=None, link=None, sync_gaps=None):
+          lr=None, link=None, sync_gaps=None, build_id=None, gen=None, node_id=None, rssi=None):
     """Build a HELLO payload (for simulators). Trailers are strictly ordered and each one
     needs the ones before it: sync_quality (2.0.1), lr (2.0.3), link (2.0.5: a
-    (link_lost, ms_since_sync, watchdog_restarts) tuple), sync_gaps (v2.2, 14-bit)."""
+    (link_lost, ms_since_sync, watchdog_restarts) tuple), sync_gaps (v2.2, 14-bit),
+    build_id (v2.1: BUILD_ID_LEN raw bytes, or their hex string), gen + node_id (2.4: the
+    protocol generation and the 6-character node id, the USB name's suffix)."""
     v = list(str(version).encode('ascii')[:8].ljust(8, b'\x00'))
     out = [MANUFACTURER, CMD_HELLO] + encode7(v) + encode7(u32be(uptime_ms)) + [reason & 0x7F]
     if role is not None:
@@ -165,7 +228,7 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
         if sync_quality is not None:
             out += [int(sync_quality) & 0x7F]
             if lr is not None:
-                out += [1 if lr else 0]
+                out += [lr & 0x7F if isinstance(lr, int) and not isinstance(lr, bool) else (1 if lr else 0)]
                 if link is not None:
                     lost, since, wd = link
                     s = max(0, min(0x3FFF, int(since)))
@@ -173,6 +236,14 @@ def hello(version='2.0', uptime_ms=1000, reason=1, role=None, board=None, sync_q
                     if sync_gaps is not None:
                         g = max(0, min(0x3FFF, int(sync_gaps)))
                         out += [(g >> 7) & 0x7F, g & 0x7F]
+                        if build_id is not None:
+                            b = bytes.fromhex(build_id) if isinstance(build_id, str) else bytes(build_id)
+                            out += encode7(list(b[:BUILD_ID_LEN].ljust(BUILD_ID_LEN, b'\x00')))
+                            if gen is not None:
+                                nid = str(node_id or '').upper().encode('ascii')[:NODE_ID_LEN]
+                                out += [int(gen) & 0x7F] + list(nid.ljust(NODE_ID_LEN, b'0'))
+                                if rssi is not None:   # 2.4: dBm (negative) or 0 unknown, sent as -dBm
+                                    out += [(-int(rssi)) & 0x7F]
     return out
 
 
@@ -191,10 +262,11 @@ def config_state(rf_sim=False, delay_ms=400, role=None, board=None, layer=None,
     return out
 
 
-def running_state_chunks(receivers, uptime_ms=1000, synced=True):
+def running_state_chunks(receivers, uptime_ms=1000, synced=True, alone=None):
     """receivers: list of dicts {mac:[6], layer, version, last_seen_ms, index, sync_quality,
     sync_gaps}. One chunk each. sync_quality (2.0.1) defaults to LOCKED (2); sync_gaps (v2.2,
-    u16 big-endian) defaults to 0."""
+    u16 big-endian) defaults to 0. alone (v2.1) is appended to the empty-table chunk only;
+    None = a pre-2.1 node, which sends no such byte."""
     chunks = []
     n = len(receivers)
     count = max(1, n)
@@ -208,9 +280,13 @@ def running_state_chunks(receivers, uptime_ms=1000, synced=True):
                    + u32be(int(r.get('last_seen_ms', 0)))
                    + [1, int(r.get('index', 0)) & 0x7F, int(r.get('sync_quality', 2)) & 0x7F,
                       (gaps >> 8) & 0xFF, gaps & 0xFF])
+            if 'rssi' in r:   # 2.4 tail: the slave's dBm for its master, as -dBm (0 unknown)
+                raw += [(-int(r['rssi'] or 0)) & 0x7F]
             d += [1] + encode7(raw)
         else:
             d += [0]
+            if alone is not None:
+                d += [1 if alone else 0]
         chunks.append(d)
     return chunks
 
@@ -242,12 +318,20 @@ def parse(data):
             info['sync_quality'] = d[18]   # 2.0.1: NOWDE_SYNC_* (0 none, 1 coarse, 2 locked)
         if len(d) >= 20:
             info['lr'] = bool(d[19])       # 2.0.3: the long-range PHY switch as this node runs it
+            info['lr_mode'] = LR_NAMES.get(d[19], 'mode-%d' % d[19])   # 2.4: off / 250k / 500k
         if len(d) >= 24:                   # 2.0.5: the receive link as this node sees it
             info['link_lost'] = bool(d[20])
             info['ms_since_sync'] = (d[21] << 7) | d[22]   # 0x3FFF = >= 16.4 s, or never
             info['watchdog_restarts'] = d[23]
         if len(d) >= 26:
             info['sync_gaps'] = (d[24] << 7) | d[25]   # v2.2: MEDIA_SYNC frames this node missed
+        if len(d) >= 36:
+            info['build_id'] = bytes(decode7(d[26:36])[:BUILD_ID_LEN]).hex()   # v2.1: app ELF SHA-256 head
+        if len(d) >= 43:                   # 2.4: protocol generation + node id (the USB name's suffix)
+            info['gen'] = d[36]
+            info['node_id'] = bytes(d[37:43]).decode('ascii', 'replace')
+        if len(d) >= 44:                   # 2.4: dBm of the locked master here; None = unknown
+            info['rssi'] = -d[43] if d[43] else None
         return name, info
     if cmd == CMD_CONFIG_STATE and len(d) >= 3:
         info = {'rf_sim': bool(d[0]), 'rf_sim_delay_ms': (d[1] << 7) | d[2]}
@@ -266,8 +350,10 @@ def parse(data):
         info = {'uptime_ms': from_u32be(decode7(d[0:5])), 'synced': bool(d[5]), 'total': d[6],
                 'chunk': d[7], 'chunks': d[8], 'receivers': []}
         idx = 10
-        for _ in range(d[9]):
-            r = decode7(d[idx:idx + 45])   # v2.2: 39 raw -> 45 encoded (2.0.1 was 37 -> 43)
+        for k in range(d[9]):
+            # v2.2: 39 raw -> 45 encoded (2.0.1 was 37 -> 43); 2.4: 40 -> 46. The record is the
+            # chunk's tail (one per chunk), so the last one is read to the end, whatever it grew to.
+            r = decode7(d[idx:] if k == d[9] - 1 else d[idx:idx + 45])
             idx += 45
             if len(r) < 36:
                 break
@@ -277,8 +363,20 @@ def parse(data):
                 'version': bytes(r[22:30]).decode('ascii', 'ignore').rstrip('\x00'),
                 'last_seen_ms': from_u32be(r[30:34]), 'index': r[35],
                 'sync_quality': r[36] if len(r) >= 37 else 0xFF,     # 2.0.1
-                'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0})   # v2.2
+                'sync_gaps': ((r[37] << 8) | r[38]) if len(r) >= 39 else 0,    # v2.2
+                'rssi': (-r[39] if r[39] else None) if len(r) >= 40 else None})   # 2.4
+        if d[9] == 0 and len(d) >= 11:
+            info['alone'] = bool(d[10])   # v2.1, empty-table chunk only: no peer heard since boot
         return name, info
+    if cmd == CMD_OTA_DATA_ACKED and len(d) >= 2:
+        return name, {'seq': d[0], 'len': d[1], 'data': decode7(d[2:])}
+    if cmd == CMD_OTA_ACK and len(d) >= 2:
+        if d[0] == OTA_ACK_SEQ_END and len(d) >= 4:   # 2.4: OTA_END's verdict
+            return name, {'end': True, 'status': d[1],
+                          'verdict': OTA_END_STATUS.get(d[1], 'status-%d' % d[1]),
+                          'duplicates': (d[2] << 7) | d[3]}
+        return name, {'end': False, 'seq': d[0], 'status': d[1],
+                      'verdict': OTA_CHUNK_STATUS.get(d[1], 'status-%d' % d[1])}
     if cmd == CMD_LOG:
         return name, {'text': bytes(b & 0x7F for b in d).decode('ascii', 'replace')}
     if cmd == CMD_ERROR_REPORT and len(d) >= 2:

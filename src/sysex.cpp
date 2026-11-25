@@ -6,6 +6,8 @@
 
 #include <esp_now.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
+#include <esp_mac.h>
 #include <Update.h>
 
 #include "esp_now_handlers.h"
@@ -16,6 +18,7 @@
 #include "sender_mode.h"
 #include "storage.h"
 #include "watchdog.h"
+#include "host_clock.h"
 
 
 // The media-sync relay used to fire one esp_now_send() per slave back-to-back and throw every
@@ -53,6 +56,16 @@ esp_err_t relaySend(const uint8_t* mac, const void* buf, size_t len) {
 static size_t otaTotalSize = 0;
 static size_t otaReceivedSize = 0;
 static uint32_t otaStartTime = 0;
+// 2.4 (#t-046): the last chunk OTA_DATA_ACKED wrote. Stop-and-wait means the host never sends seq
+// N+1 before N's ack, so the same seq again is a resend after a LOST ACK -- acked, never written
+// twice (29/09: five garden reflashes refused at OTA_END, each one duplicate chunk long). -1 = none.
+static int16_t otaLastSeq = -1;
+static uint8_t otaLastLen = 0;
+static uint16_t otaDuplicates = 0;
+// 2.4: a validated OTA_END restarts from otaRestartPoll() (MIDI task), once the verdict and the log
+// have been pumped to the host -- not from a delay(2000) that froze the very task doing the pumping.
+static unsigned long otaRestartAt = 0;
+#define OTA_RESTART_AFTER_MS 500
 
 // Forward declarations for helper functions
 void sendHello();
@@ -60,6 +73,23 @@ void sendSysExBytes(const uint8_t* message, int len);
 void sendConfigState();
 void sendRunningState();
 void sendErrorReport(uint8_t errorCode, const uint8_t* context, uint8_t contextLength);
+
+// 2.4: OTA_END's verdict, the frame a host waits for instead of guessing from a vanished port.
+// OTA_ACK with seq 0x7F: F0 7D 23 7F status dupHi dupLo F7 (8 bytes; a chunk ack is 6, so a host
+// tells them apart by length too). status: 3 no session, 4 validated (restarting in
+// OTA_RESTART_AFTER_MS), 5 refused: size mismatch, 6 refused: the image did not validate.
+static void sendOtaEndVerdict(uint8_t status) {
+  uint16_t dups = otaDuplicates > 0x3FFF ? 0x3FFF : otaDuplicates;
+  uint8_t msg[8] = {SYSEX_START, SYSEX_MANUFACTURER_ID, SYSEX_CMD_OTA_ACK, OTA_ACK_SEQ_END, status,
+                    (uint8_t)((dups >> 7) & 0x7F), (uint8_t)(dups & 0x7F), SYSEX_END};
+  sendSysExBytes(msg, 8);
+}
+
+void otaRestartPoll() {
+  if (otaRestartAt != 0 && (long)(millis() - otaRestartAt) >= 0) {
+    esp_restart();
+  }
+}
 
 // 7-bit encoding helpers
 // Encodes 8-bit data to 7-bit MIDI-safe format
@@ -89,6 +119,10 @@ int encode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   return outIdx;
 }
 
+// The most 7-bit-encoded bytes whose decode fits a 256 B chunk buffer (293 -> 256). OTA chunks are
+// <= 255 B by the length byte of OTA_DATA_ACKED; a longer frame is dropped, never decoded.
+constexpr int OTA_MAX_ENCODED = 293;
+
 // Decodes 7-bit MIDI format back to 8-bit data
 int decode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   int outIdx = 0;
@@ -113,7 +147,7 @@ int decode7bit(const uint8_t* input, int inputLen, uint8_t* output) {
   return outIdx;
 }
 
-void handleSysExMessage(const uint8_t* data, uint8_t length) {
+void handleSysExMessage(const uint8_t* data, uint16_t length) {
   // Basic validation
   if (length < 2) {
     return;  // Too short to be valid
@@ -123,6 +157,12 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
     return;  // Not a valid SysEx message
   }
   
+  // Universal real-time MTC full-frame: F0 7F 7F 01 01 hh mm ss ff F7 (v2.1 host MIDI in)
+  if (length == 10 && data[1] == 0x7F && data[2] == 0x7F && data[3] == 0x01 && data[4] == 0x01) {
+    hostClockOnFullFrame(data[5], data[6], data[7], data[8]);
+    return;
+  }
+
   // Silently ignore SysEx messages not for us (e.g., Universal SysEx 0x7E, system messages)
   if (length < 3 || data[1] != SYSEX_MANUFACTURER_ID) {
     return;
@@ -225,6 +265,9 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       // Not gated on sender mode: OTA only ever arrives over this node's own USB, and a slave
       // accepting it beacons nothing. The gate locked every slave out of host-driven reflash
       // (Biennale 2026 install, 2026-09-08: LR could not roll out without opening the boxes).
+      if (otaRestartAt != 0) {
+        break;  // a validated image is about to boot: nothing may open a new session over it
+      }
       if (length >= 9) {
         // Decode firmware size (4 bytes raw -> 5 bytes encoded)
         uint8_t sizeBytes[4];
@@ -255,6 +298,9 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         otaInProgress = true;
         otaReceivedSize = 0;
         otaStartTime = millis();
+        otaLastSeq = -1;
+        otaLastLen = 0;
+        otaDuplicates = 0;
         
         DEBUG_SERIAL.println("[OTA BEGIN] Ready to receive firmware data");
         DEBUG_SERIAL.printf("[OTA BEGIN] Allocated partition size: %u bytes\r\n", Update.size());
@@ -265,7 +311,13 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       // Format: F0 7D 06 [data(7-bit encoded)] F7
       if (otaInProgress && length > 4) {
         // Decode data (encoded length - 3 for header/footer)
-        uint8_t encodedLen = length - 4;  // Subtract F0, 7D, 06, F7
+        int encodedLen = length - 4;  // Subtract F0, 7D, 06, F7
+        if (encodedLen > OTA_MAX_ENCODED) {
+          // 2.4: only reachable since length is uint16_t. Dropped, not written: END's size check
+          // then refuses the image instead of a stack overflow corrupting it.
+          sendErrorReport(ERROR_SYSEX_PARSE_ERROR, nullptr, 0);
+          break;
+        }
         uint8_t decodedData[256];
         int decodedLen = decode7bit(&data[3], encodedLen, decodedData);
         
@@ -301,16 +353,22 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       // 546 bytes short of 1 180 224 at 25 ms pacing, no way to tell until OTA_END). Here every
       // chunk carries its raw length and a sequence number: a truncated frame decodes short, is
       // NOT written, and the ACK tells the host to resend it. status: 0 ok, 1 bad length (dropped),
-      // 2 write failed (session aborted), 3 no session.
+      // 2 write failed (session aborted), 3 no session. 2.4: a duplicate (the same seq and length as
+      // the chunk just written: its ack was lost and the host resent it) answers 0, not written.
       uint8_t seq = length >= 6 ? data[3] : 0;
       uint8_t st = 3;
       if (otaInProgress && length >= 6) {
         uint8_t want = data[4];
-        uint8_t encodedLen = length - 6;  // F0 7D 0C seq len ... F7
+        int encodedLen = length - 6;  // F0 7D 0C seq len ... F7
         uint8_t decodedData[256];
-        int decodedLen = decode7bit(&data[5], encodedLen, decodedData);
+        int decodedLen = encodedLen <= OTA_MAX_ENCODED ? decode7bit(&data[5], encodedLen, decodedData) : -1;
         if (decodedLen != want || want == 0) {
           st = 1;                          // short/garbled frame: drop it, the host resends
+        } else if ((int16_t)seq == otaLastSeq && want == otaLastLen) {
+          otaDuplicates++;                 // the ack was lost, not the chunk: ack it again, write nothing
+          DEBUG_SERIAL.printf("[OTA DATA] duplicate seq %u at %u: acked, not written (%u so far)\r\n",
+                              seq, (unsigned)otaReceivedSize, otaDuplicates);
+          st = 0;
         } else if (Update.write(decodedData, decodedLen) != (size_t)decodedLen) {
           DEBUG_SERIAL.printf("[OTA DATA] Write failed at %u\r\n", otaReceivedSize);
           Update.abort();
@@ -318,6 +376,8 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
           st = 2;
         } else {
           otaReceivedSize += decodedLen;
+          otaLastSeq = seq;
+          otaLastLen = want;
           st = 0;
         }
       }
@@ -342,6 +402,7 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
                              (int32_t)otaReceivedSize - (int32_t)otaTotalSize);
           Update.abort();
           otaInProgress = false;
+          sendOtaEndVerdict(OTA_END_SIZE_MISMATCH);
           sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
           break;
         }
@@ -350,18 +411,24 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         if (Update.end(true)) {
           DEBUG_SERIAL.println("[OTA END] SUCCESS - Firmware validated");
           DEBUG_SERIAL.printf("[OTA END] New partition will boot on restart\r\n");
-          DEBUG_SERIAL.println("[OTA END] Rebooting in 2 seconds...");
-          DEBUG_SERIAL.flush();
-          
-          delay(2000);
-          esp_restart();
+          DEBUG_SERIAL.printf("[OTA END] %u duplicate chunk(s) acked, not written\r\n", otaDuplicates);
+          DEBUG_SERIAL.printf("[OTA END] Rebooting in %u ms...\r\n", OTA_RESTART_AFTER_MS);
+          // 2.4: the verdict frame, then the restart from otaRestartPoll() once the MIDI task has
+          // pumped it and the log out. A delay() here froze that task: the host saw neither, only a
+          // port that vanished (29/09, W2: the host tool hung 7 min deciding what that meant).
+          sendOtaEndVerdict(OTA_END_VALIDATED);
+          otaRestartAt = millis() + OTA_RESTART_AFTER_MS;
+          if (otaRestartAt == 0) otaRestartAt = 1;
         } else {
           DEBUG_SERIAL.printf("[OTA END] FAILED - Error: %s\r\n", Update.errorString());
           DEBUG_SERIAL.printf("[OTA END] Error code: %d\r\n", Update.getError());
+          sendOtaEndVerdict(OTA_END_INVALID);
           sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
         }
         
         otaInProgress = false;
+      } else if (otaRestartAt == 0) {
+        sendOtaEndVerdict(OTA_END_NO_SESSION);   // 2.4: an END with no session says so
       }
       break;
 
@@ -427,45 +494,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
         syncPacket.meshTimestamp = meshTimestamp;  // Set timestamp BEFORE any delay
         syncPacket.volume = volume;
         syncPacket.flags = mflags;
-        // v2.2: the origin's frame counter. Free-running and wrapping at 16 bits -- slaves diff
-        // consecutive values to count what they missed (there is no ACK left to count), and
-        // #t-024 will dedup relayed copies on (origin, seq). Minted here, never re-stamped.
-        static uint16_t mediaSyncSeq = 0;
-        syncPacket.seq = ++mediaSyncSeq;
-
-        // 2.0.2: remember what we are relaying so the master's own LCD/LED can show it.
-        // Display only -- deliberately NOT mediaSyncState (see MasterRelayState).
-        masterRelay.index = mediaIndex;
-        masterRelay.positionMs = positionMs;
-        masterRelay.state = state;
-        masterRelay.updatedAt = millis();
-
-        // v2.2: ONE broadcast frame for the whole fleet. The per-slave esp_now_send() loop is
-        // gone, and with it the fan-out burst that silently dropped its last peers -- but the
-        // real change is that delivery no longer consults the receiver table at ALL. "Whoever
-        // hears, plays": slaves already filter on the packet's layer (receiver_mode.cpp), so a
-        // node that moves, arrives or goes needs no peer churn on the master, and a v1.2 slave
-        // reads this frame exactly as before. Airtime drops ~N-fold, which is what makes the LR
-        // PHY affordable. The table stays -- it is still how the master knows who is out there.
-        //
-        // The trade: broadcast has no MAC-layer ACK and no retry, so a lost frame is simply
-        // lost -- covered by the 10 Hz repeat and the slave regenerating MTC from the mesh
-        // clock, i.e. redundancy over time instead of retransmission per packet. Detection is
-        // what actually had to be replaced, and it moved to the slaves: `seq` above, counted
-        // into ReceiverInfo.syncGaps and surfaced per-slave in RUNNING_STATE.
-        if (!rfSimulationEnabled) {
-          relaySend(broadcastAddress, &syncPacket, sizeof(syncPacket));
-        } else {
-          for (int j = 0; j < MAX_DELAYED_PACKETS; j++) {
-            if (!delayedPackets[j].active) {
-              delayedPackets[j].sendTime = millis() + random(0, rfSimMaxDelayMs + 1);
-              delayedPackets[j].packet = syncPacket;
-              memcpy(delayedPackets[j].receiverMac, broadcastAddress, 6);
-              delayedPackets[j].active = true;
-              break;
-            }
-          }
-        }
+        // `seq`, the master's display state and the v2.2 broadcast are shared with the v2.1
+        // MIDI-in path (host_clock.cpp), so they live in broadcastMediaSync() (sender_mode.cpp).
+        hostClockNoteSysExSync();   // SysEx keeps priority over MIDI-in (v2.1)
+        broadcastMediaSync(syncPacket);
 
         // ESP-NOW TX logging disabled for media sync to reduce clutter
         // Sync packets sent every ~100ms but not logged
@@ -629,15 +661,40 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
       }
       break;
 
+    case SYSEX_CMD_SET_NEIGHBOURS:
+      // 2.4 bench-only -- Format: F0 7D 70 [n x MAC(6), 7-bit packed] F7 ; n = 0 accepts all.
+      // RAM only: a power cycle forgets it. Release builds refuse it (ERROR_REPORT 02).
+#ifdef NOWDE_BENCH_NEIGHBOURS
+      {
+        uint8_t macs[NOWDE_MAX_NEIGHBOURS * 6 + 8] = {0};
+        int enc = length - 4;
+        int maxEnc = ((NOWDE_MAX_NEIGHBOURS * 6) / 7) * 8 + 8;
+        int n = (enc > 0 && enc <= maxEnc) ? decode7bit(&data[3], enc, macs) / 6 : 0;
+        if (enc < 0 || enc > maxEnc || n > NOWDE_MAX_NEIGHBOURS) {
+          sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+          break;
+        }
+        for (int i = 0; i < n; i++) memcpy(benchNeighbours[i], &macs[i * 6], 6);
+        benchNeighbourCount = (uint8_t)n;
+        DEBUG_SERIAL.printf("[BENCH] neighbour mask: %d MAC(s)%s\r\n", n, n ? "" : " (accept all)");
+        sendHello();
+      }
+#else
+      sendErrorReport(ERROR_SYSEX_PARSE_ERROR, &data[2], 1);
+#endif
+      break;
+
     case SYSEX_CMD_SET_LR:
       // 2.0.3 — Format: F0 7D 0B [on: 0/1] F7 ; long-range PHY switch. Stored in NVS, then the node
       // restarts to apply it (the protocol is set at init, before the channel). All-or-nothing
       // across the mesh: a node left on the other setting is invisible, not degraded.
-      if (length >= 5 && (data[3] == 0 || data[3] == 1)) {
-        bool on = data[3] == 1;
-        saveLrToEEPROM(on);
-        lrEnabled = on;
-        DEBUG_SERIAL.printf("[SET_LR] %s -> restarting\r\n", on ? "ON" : "OFF");
+      // 2.4: mode 0 off, 1 LR 250k, 2 LR 500k (a 2.0.3 host's 0/1 means what it meant).
+      if (length >= 5 && data[3] <= NOWDE_LR_500K) {
+        lrMode = data[3];
+        lrEnabled = lrMode != NOWDE_LR_OFF;
+        saveLrToEEPROM(lrMode);
+        DEBUG_SERIAL.printf("[SET_LR] %s -> restarting\r\n",
+                            lrMode == NOWDE_LR_500K ? "500k" : lrEnabled ? "250k" : "OFF");
         sendHello();               // the HELLO trailer already carries the new value
         delay(300);
         esp_restart();
@@ -731,8 +788,10 @@ void handleSysExMessage(const uint8_t* data, uint8_t length) {
 // ============= HELPER FUNCTIONS =============
 
 void sendHello() {
-  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)] F7
-  // Sent on boot and on QUERY_CONFIG / SET_ROLE. role/board are v2 trailing fields.
+  // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)]
+  //         [syncQuality(1)] [lr(1)] [syncGaps(2)] [buildId(8,encoded:10)] [gen(1)] [nodeId(6)] F7
+  // Sent on boot and on QUERY_CONFIG / SET_ROLE. Everything after bootReason is a trailing field,
+  // appended in release order (v2, 2.0.1, 2.0.3, v2.2, v2.1, 2.4).
   
   uint8_t rawData[16];
   uint8_t message[64];
@@ -769,7 +828,7 @@ void sendHello() {
   message[msgIdx++] = nodeSyncQuality() & 0x7F;
   // 2.0.3 trailer: the LR switch as this node runs it, so a fleet check reads the PHY mode of
   // every node from its host without opening a box (parsers before 2.0.3 ignore the byte).
-  message[msgIdx++] = lrEnabled ? 1 : 0;
+  message[msgIdx++] = lrMode & 0x7F;   // 2.4: 0 off, 1 250k, 2 500k (old readers: nonzero = on)
   // 2.0.5 trailer: the receive link as this node sees it -- linkLost (0/1), milliseconds since the
   // last accepted MEDIA_SYNC as two 7-bit bytes (hi, lo; capped at 0x3FFF = 16.4 s, also 0x3FFF
   // when none ever came), and the radio watchdog's restart count since power-on (0..127). Hosts
@@ -790,6 +849,24 @@ void sendHello() {
     message[msgIdx++] = (gaps >> 7) & 0x7F;
     message[msgIdx++] = gaps & 0x7F;
   }
+  // v2.1 trailer: build identity -- the head of the app ELF SHA-256 the build stamped into the app
+  // descriptor. `version` is a release string, so a bench build and a tagged one read alike on the
+  // wire; this tells them apart, and the same bytes sit at offset 0xB0 of the .bin, so a host checks
+  // a unit against a file instead of reflashing it to be sure (the 04/09 provisioning).
+  msgIdx += encode7bit(esp_app_get_description()->app_elf_sha256, NOWDE_BUILD_ID_LEN, &message[msgIdx]);
+  // 2.4 trailer: protocol generation, then the node id (payload 36, 37..42). ASCII hex is
+  // already 7-bit, so it goes raw: a host reads the same six characters the USB name shows.
+  message[msgIdx++] = NOWDE_HELLO_GEN & 0x7F;
+  {
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    char nodeId[NOWDE_NODE_ID_LEN + 1];
+    snprintf(nodeId, sizeof(nodeId), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+    for (int i = 0; i < NOWDE_NODE_ID_LEN; i++) message[msgIdx++] = (uint8_t)nodeId[i] & 0x7F;
+  }
+  // 2.4 trailer (payload 43): -dBm of the last frame straight from the locked master, 0 =
+  // unknown or not a slave. The walk (nowde#t-052) reads link quality from this on a slave.
+  message[msgIdx++] = (uint8_t)(-(int)currentMasterRssi()) & 0x7F;
 
   message[msgIdx++] = SYSEX_END;
   int idx = msgIdx;  // Total message length
@@ -959,6 +1036,10 @@ void sendRunningState() {
   unsigned long uptime = millis();
   SyncState syncState = meshClock.getSyncState();
   bool synced = (syncState == SyncState::SYNCED);
+  // v2.1: no slave listed AND the mesh clock has not heard one peer since boot. meshSynced=0 alone
+  // cannot say why; this splits "nobody to be in sync with" (a lone master -- a normal rack) from
+  // "had peers, lost them" (LOST -- a real fault), so a host can paint the first one neutral.
+  bool alone = (numActive == 0) && (syncState == SyncState::ALONE);
 
   // Only log summary when numActive changes or every 10 seconds
   static unsigned long lastLogTime = 0;
@@ -1026,6 +1107,8 @@ void sendRunningState() {
       // so a rising number here is the only thing that still names a half-deaf node.
       rawData[rawIdx++] = (entry.syncGaps >> 8) & 0xFF;
       rawData[rawIdx++] = entry.syncGaps & 0xFF;
+      // 2.4: what this slave reports for its master, as -dBm (7-bit; 0 = unknown).
+      rawData[rawIdx++] = (uint8_t)(-(int)entry.rssi) & 0x7F;
 
       int encodedLen = encode7bit(rawData, rawIdx, &message[msgIdx]);
       if (msgIdx + encodedLen >= 512) {
@@ -1034,6 +1117,12 @@ void sendRunningState() {
         return;
       }
       msgIdx += encodedLen;
+    }
+
+    // v2.1 trailer, on the empty-table chunk only. A chunk carrying a record never has it: a master
+    // listing a slave is not alone, and the record stays the frame's tail so it can keep growing.
+    if (chunkReceivers == 0) {
+      message[msgIdx++] = alone ? 1 : 0;
     }
 
     message[msgIdx++] = SYSEX_END;

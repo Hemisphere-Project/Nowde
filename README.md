@@ -73,7 +73,7 @@ receivers emit.
   clock and sends `CC#100 = 0` (configurable: freewheel instead).
 - v2 adds **MTC full-frame** SysEx (`F0 7F 7F 01 01 hh mm ss ff F7`) on start and
   jumps, and **MIDI Start / Stop** on state edges.
-- *(v2.3, specified and not yet implemented)* **Relayed channel-voice messages** from the
+- *(v2.3)* **Relayed channel-voice messages** from the
   master's host — Note, CC, Program Change, Channel Pressure, Pitch Bend — on their original
   channel, emitted at the mesh time the master scheduled them for. A host sees ordinary MIDI
   and has nothing new to implement; the transport is the `0x04` event frame, in
@@ -212,9 +212,11 @@ copy_firmware.py    post-build hook that fills dist/
   `SET_ROLE` / `SET_LOCAL_LAYER` commands, layer wildcard, LCD / LED status,
   MTC full-frame and MIDI Start/Stop on slave outputs. First deployment: the
   six synchronized outdoor players of Biennale de Lyon 2026 (HPlayer2 master).
-- **v2.1** — generic MIDI in on the master (MTC, transport, CC#100 from any DAW
-  or QLab), Note / CC relay to every slave scheduled on mesh time, a `paused`
-  state, a standalone free-running master clock, `tools/nowde-cli`.
+- **v2.1** (not on hardware yet) — generic MIDI in on the
+  master: MTC quarter-frames / full-frame, Start / Continue / Stop and CC#100 from
+  any DAW or QLab become the mesh stream, SysEx keeping priority. Still to come:
+  Note / CC relay to every slave scheduled on mesh time, a `paused` state, a
+  standalone free-running master clock.
 
 ## License
 

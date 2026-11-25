@@ -19,6 +19,14 @@ uint8_t storedRole = NOWDE_ROLE_AUTO;
 uint8_t nodeRole = NOWDE_ROLE_LEGACY;
 uint8_t boardId = NOWDE_BOARDID_UNKNOWN;
 bool lrEnabled = NOWDE_WIFI_LR != 0;   // overwritten from NVS in setup()
+uint8_t lrMode = NOWDE_WIFI_LR;        // 2.4: NOWDE_LR_*, overwritten from NVS in setup()
+int8_t masterRssi = 0;
+unsigned long masterRssiAt = 0;
+
+int8_t currentMasterRssi() {
+  if (senderModeEnabled || masterRssiAt == 0 || (millis() - masterRssiAt) > NOWDE_RSSI_STALE_MS) return 0;
+  return masterRssi;
+}
 
 SenderEntry senderTable[MAX_SENDERS] = {};
 ReceiverEntry receiverTable[MAX_RECEIVERS] = {};
@@ -131,7 +139,10 @@ bool masterRelayPlaying() {
 
 bool layerMatches(const char* subscribed, const char* packetLayer) {
   if (strncmp(subscribed, NOWDE_LAYER_WILDCARD, MAX_LAYER_LENGTH) == 0) {
-    return true;
+    return true;   // this slave follows any layer
+  }
+  if (strncmp(packetLayer, NOWDE_LAYER_WILDCARD, MAX_LAYER_LENGTH) == 0) {
+    return true;   // v2.1: a master on "*" (MIDI-in path) addresses every slave
   }
   return strncmp(subscribed, packetLayer, MAX_LAYER_LENGTH) == 0;
 }

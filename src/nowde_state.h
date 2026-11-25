@@ -26,6 +26,13 @@ extern uint8_t boardId;
 // 2.0.3: long-range PHY on/off, loaded from NVS at boot (SET_LR 0x0B stores it and restarts).
 // All-or-nothing across the mesh, exactly like the former build flag.
 extern bool lrEnabled;
+// 2.4: which LR rate (NOWDE_LR_*); lrEnabled == (lrMode != NOWDE_LR_OFF).
+extern uint8_t lrMode;
+// 2.4: the last frame heard straight from the locked master -- its RSSI (dBm) and when.
+extern int8_t masterRssi;
+extern unsigned long masterRssiAt;
+// 2.4: masterRssi while fresh (NOWDE_RSSI_STALE_MS), else 0 = unknown. Masters read 0.
+int8_t currentMasterRssi();
 
 extern SenderEntry senderTable[MAX_SENDERS];
 extern ReceiverEntry receiverTable[MAX_RECEIVERS];
