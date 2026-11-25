@@ -1218,16 +1218,22 @@ class SerialPort(Port):
 def cmd_serial(a):
     """The serial link on one node: HELLO, the board, a CLAIM's HELLO back, the log as 0x31 frames."""
     report = {'command': 'serial', 'checks': []}
+    t_open = time.time()
     p = SerialPort(a.tty)
     try:
         h, retried = p.hello(), False
-        if not h:   # the open may still pulse a DevKitC's auto-reset (the tty raises DTR): one boot later, once
+        if not h:   # the first HELLO after an open can go unanswered (why is not read yet): once more, a boot later
             time.sleep(SERIAL_BOOT_S)
             h, retried = p.hello(), True
         h = h or {}
+        up = h.get('uptime_ms')
+        seen = ('' if up is None else f", uptime {up / 1000.0:.1f} s, boot {h.get('boot')}: "
+                + ('booted after the port opened' if booted_since(h, t_open, time.time())
+                   else 'no restart since the port opened'))
         check(report, f"{a.tty}: HELLO over the serial link", bool(h),
               f"{h.get('version')} gen {h.get('gen')} board {h.get('board')}"
-              + (f" (after a {SERIAL_BOOT_S:.0f} s retry: the port open reset the node)" if retried and h else ''))
+              + (f" (on the retry {SERIAL_BOOT_S:.0f} s later{seen})" if retried and h else
+                 (f" ({seen[2:]})" if h and seen else '')))
         p.send(nx.set_log(True))
         p.send(nx.claim())
         r = role_seen(p)
