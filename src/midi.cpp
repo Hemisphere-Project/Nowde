@@ -6,6 +6,7 @@
 #include "sysex.h"
 #include "host_link.h"
 #include "host_clock.h"
+#include "usb_out.h"   // usbOutMidiBegin: the USB-MIDI backend
 
 namespace {
 // What the host sent, whatever the link: a short message or a complete SysEx frame.
@@ -78,7 +79,7 @@ Smpte toSmpte(uint32_t positionMs) {
 }
 
 void midiInit() {
-  MIDI.begin();
+  usbOutMidiBegin();
   midiEventInit();   // v2.3 0x04 (#t-038): the slave's hand-off queue, before ESP-NOW is up
 }
 

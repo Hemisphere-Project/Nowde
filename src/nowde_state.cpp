@@ -7,7 +7,6 @@
 USBCDC USBSerial(0);
 #endif
 
-USBMIDI MIDI;
 Preferences preferences;
 ESPNowMeshClock meshClock(1000, 0.25, 10000, 5000, 10);
 

@@ -18,8 +18,6 @@
  */
 
 #include <Arduino.h>
-#include <USB.h>
-#include <USBMIDI.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -79,10 +77,7 @@ void configureUsbDescriptors() {
   DEBUG_SERIAL.print("[USB] Setting product name: ");
   DEBUG_SERIAL.println(productName);
   
-  USB.VID(0x303A);
-  USB.PID(0x8000);
-  USB.productName(productName);
-  USB.manufacturerName("Hemisphere");
+  usbOutDescriptors(productName);
 }
 
 void addBroadcastPeer() {
@@ -337,7 +332,7 @@ void setup() {
   configureUsbDescriptors();
   midiInit();
   DEBUG_SERIAL.begin();           // USBCDC behind the log ring (usb_out.h)
-  USB.begin();
+  usbOutStart();
   delay(1500);                    // let the host enumerate before we log or HELLO
 #else
   usbOutInit();
@@ -349,7 +344,7 @@ void setup() {
 
 #if !NOWDE_USB_COMPOSITE
   configureUsbDescriptors();
-  USB.begin();
+  usbOutStart();
   DEBUG_SERIAL.println("[INIT] USB initialized");
 
   midiInit();

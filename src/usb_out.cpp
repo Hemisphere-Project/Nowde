@@ -1,5 +1,7 @@
 #include "usb_out.h"
 
+#include <USB.h>
+#include <USBMIDI.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/ringbuf.h>
@@ -8,6 +10,8 @@
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "usb_midi_packets.h"
+
+USBMIDI MIDI;   // the one TinyUSB MIDI interface: begun, pumped and read from this file only
 
 namespace {
 constexpr size_t MIDI_QUEUE_PACKETS = 1024;  // RUNNING_STATE bursts are ~120 packets per slave chunk
@@ -89,8 +93,35 @@ void usbOutInit() {
 #endif
 }
 
+void usbOutDescriptors(const char* productName) {
+  USB.VID(0x303A);
+  USB.PID(0x8000);
+  USB.productName(productName);
+  USB.manufacturerName("Hemisphere");
+}
+
+void usbOutMidiBegin() {
+  MIDI.begin();
+}
+
+void usbOutStart() {
+  USB.begin();
+}
+
+bool usbInRead(uint8_t* cin, uint8_t* b1, uint8_t* b2, uint8_t* b3) {
+  midiEventPacket_t packet;
+  if (!MIDI.readPacket(&packet)) {
+    return false;
+  }
+  *cin = packet.header & 0x0F;
+  *b1 = packet.byte1;
+  *b2 = packet.byte2;
+  *b3 = packet.byte3;
+  return true;
+}
+
 // One USB-MIDI packet into the queue (false = queue full). TinyUSB's packet type stays in this
-// file and host_link.cpp's receive loop: everything else hands plain MIDI bytes (Nowde 3, #t-050 ①).
+// file: everything else hands plain MIDI bytes (Nowde 3, #t-050 ①).
 static bool usbOutMidi(const midiEventPacket_t& packet) {
   if (!midiQueue) {
     return false;

@@ -2,11 +2,10 @@
 
 #include "midi_rx.h"
 #include "nowde_config.h"
-#include "nowde_state.h"   // MIDI (TinyUSB), hostResumed
+#include "nowde_state.h"   // hostResumed
 #include "usb_out.h"
 
-// The USB-MIDI backend: usb_out.* queues and pumps, TinyUSB's packets are read here. The packet
-// type never leaves this file and usb_out.cpp.
+// The USB-MIDI backend: usb_out.* queues, pumps and reads TinyUSB; this file sees CIN + bytes only.
 namespace {
 constexpr size_t SYSEX_BUFFER_SIZE = 512;  // Large enough for RUNNING_STATE payloads (~350B)
 MidiRxParser<SYSEX_BUFFER_SIZE> rx;
@@ -40,13 +39,13 @@ void hostLinkPump() {
 }
 
 void hostLinkPoll(HostLinkSink& sink) {
-  midiEventPacket_t packet;
-  while (MIDI.readPacket(&packet)) {
+  uint8_t cin, b1, b2, b3;
+  while (usbInRead(&cin, &b1, &b2, &b3)) {
     if (!hostLinked()) {
       hostResumed = true;       // first packet after a silence: the host may be probing our role
     }
     lastHostRxTime = millis();  // anything from the host counts as a heartbeat
-    rx.usbPacket(packet.header & 0x0F, packet.byte1, packet.byte2, packet.byte3, sink);
+    rx.usbPacket(cin, b1, b2, b3, sink);
   }
 }
 

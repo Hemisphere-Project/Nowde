@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <USBMIDI.h>
 
 void midiInit();
 void midiSendCC(uint8_t cc, uint8_t value);       // control change, channel 1

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Preferences.h>
-#include <USBMIDI.h>
 #include <ESPNowMeshClock.h>
 #include "nowde_config.h"
 
@@ -10,7 +9,6 @@
 extern USBCDC USBSerial;   // composite CDC next to MIDI on the single USB-C
 #endif
 
-extern USBMIDI MIDI;
 extern Preferences preferences;
 extern ESPNowMeshClock meshClock;
 
@@ -48,7 +46,7 @@ extern MasterRelayState masterRelay;
 // v2.2: which master this slave follows (see OriginLock in nowde_config.h)
 extern OriginLock originLock;
 
-// Host link: last time any USB-MIDI packet came in from the host
+// Host link (host_link.h owns the link itself)
 extern bool hostResumed;      // set when the host speaks after a silence; QUERY_RUNNING_STATE answers HELLO once
 extern bool otaInProgress;
 
