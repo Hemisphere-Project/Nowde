@@ -79,7 +79,9 @@ Smpte toSmpte(uint32_t positionMs) {
 }
 
 void midiInit() {
+#if NOWDE_HOST_LINK == NOWDE_LINK_USB_MIDI
   usbOutMidiBegin();
+#endif
   midiEventInit();   // v2.3 0x04 (#t-038): the slave's hand-off queue, before ESP-NOW is up
 }
 

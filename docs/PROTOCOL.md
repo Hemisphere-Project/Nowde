@@ -448,6 +448,19 @@ TinyUSB/DWC2 lost IN transfers whenever the CDC and MIDI endpoints were both act
 silent until reboot, or the hub dropping the device). `-DNOWDE_LOG_CDC` puts the log back on
 the CDC for debugging.
 
+### Serial host link *(Nowde 3 alpha, #t-050 — not yet run on a board)*
+
+A node built with a serial host link (envs `devkitc-uart`, `devkitc-cdc`) carries **the same bytes**
+as the USB-MIDI packets' payload, nothing added: SysEx frames `F0 7D … F7` and short MIDI
+messages, status first. The node never sends running status and accepts it on input; real-time
+bytes may arrive anywhere, a status byte inside a frame drops that frame. `devkitc-uart`: the
+DevKitC-1's UART port (its USB-UART bridge), **921600 8N1** (`NOWDE_HOST_BAUD`), the log as LOG
+frames (`0x31`) on the same link while `SET_LOG` is on. `devkitc-cdc`: the S3's native port as
+hardware CDC (no TinyUSB, no MIDI endpoint), the log on the UART port. Any byte from the host is
+the link's heartbeat, as any packet is on USB. A port nobody drains for 200 ms drops what is
+queued, the USB rule. Host side: open the port with DTR/RTS held off (an open resets a
+DevKit-style board), find the node by its HELLO, never by « first port ».
+
 While no host reads the MIDI port the TinyUSB FIFO fills and the queue behind it stalls; after
 200 ms of stall the queue is dropped, so a host opening the port later never receives a ghost
 stream of stale MTC / `CC#100` (it gets at most the FIFO's 16 packets, and a fresh `CC#100`

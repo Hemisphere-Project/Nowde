@@ -54,6 +54,11 @@
 #define NOWDE_LED_NONE    0
 #define NOWDE_LED_WS2812  1
 #define NOWDE_LINK_USB_MIDI 0
+#define NOWDE_LINK_UART     1   // the board's USB-UART bridge (UART0), NOWDE_HOST_BAUD 8N1
+#define NOWDE_LINK_USB_CDC  2   // the S3's native port as hardware CDC (no TinyUSB)
+#ifndef NOWDE_HOST_BAUD
+  #define NOWDE_HOST_BAUD 921600
+#endif
 
 #if defined(NOWDE_BOARD_ATOMS3)
   #define NOWDE_BOARD_NAME "atoms3"
@@ -75,10 +80,16 @@
   #define NOWDE_BUTTON_PIN -1                    // BOOT, GPIO0: ③
   #define NOWDE_SCREEN 0
   #define NOWDE_FLASH_MB 16                      // N16R8, the AnnaTV model; an N8 needs its own env
-  #define NOWDE_HOST_LINK NOWDE_LINK_USB_MIDI
+  #ifndef NOWDE_HOST_LINK                        // env devkitc-uart / devkitc-cdc set it
+    #define NOWDE_HOST_LINK NOWDE_LINK_USB_MIDI
+  #endif
   #define NOWDE_BOARD_LAYER NOWDE_LAYER_UNASSIGNED
   #define NOWDE_USB_COMPOSITE 0
-  #define NOWDE_LOG_SYSEX 0
+  #if NOWDE_HOST_LINK == NOWDE_LINK_UART
+    #define NOWDE_LOG_SYSEX 1                      // UART0 is the host link: the log rides it
+  #else
+    #define NOWDE_LOG_SYSEX 0                      // UART0 is free: the log port
+  #endif
 #endif
 
 #if NOWDE_LOG_SYSEX

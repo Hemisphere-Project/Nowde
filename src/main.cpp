@@ -59,6 +59,7 @@ void printBanner() {
   DEBUG_SERIAL.println();
 }
 
+#if NOWDE_HOST_LINK == NOWDE_LINK_USB_MIDI
 void configureUsbDescriptors() {
   // Get MAC address for unique device identification using esp_efuse API
   uint8_t mac[6];
@@ -79,6 +80,7 @@ void configureUsbDescriptors() {
   
   usbOutDescriptors(productName);
 }
+#endif
 
 void addBroadcastPeer() {
   esp_now_peer_info_t peerInfo = {};
@@ -336,16 +338,22 @@ void setup() {
   delay(1500);                    // let the host enumerate before we log or HELLO
 #else
   hostLinkInit();
+#if NOWDE_LOG_SYSEX
+  DEBUG_SERIAL.begin();           // the log rides the host link (host_log.h)
+#else
   DEBUG_SERIAL.begin(115200);     // UART0
+#endif
   delay(500);
 #endif
 
   printBanner();
 
 #if !NOWDE_USB_COMPOSITE
+#if NOWDE_HOST_LINK == NOWDE_LINK_USB_MIDI
   configureUsbDescriptors();
   usbOutStart();
   DEBUG_SERIAL.println("[INIT] USB initialized");
+#endif
 
   midiInit();
   DEBUG_SERIAL.println("[INIT] USB MIDI initialized");

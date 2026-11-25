@@ -1,3 +1,6 @@
+#include "nowde_config.h"
+
+#if NOWDE_HOST_LINK == NOWDE_LINK_USB_MIDI
 #include "usb_out.h"
 
 #include <USB.h>
@@ -126,3 +129,4 @@ void usbOutPump() {
     break;
   }
 }
+#endif  // NOWDE_LINK_USB_MIDI
