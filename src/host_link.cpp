@@ -127,14 +127,9 @@ bool hostLinkSend(const uint8_t* bytes, size_t len) {
 }
 
 bool hostLinkSendMessage(uint8_t status, uint8_t d1, uint8_t d2) {
-  UsbMidiPacket m;   // the same validation and masking as the USB-MIDI link
-  if (!usbMidiMessagePacket(status, d1, d2, &m)) {
-    return false;
-  }
-  const size_t len = (m.cin == 0x0F || m.cin == 0x05) ? 1
-                   : (m.cin == 0x02 || m.cin == 0x0C || m.cin == 0x0D) ? 2 : 3;
-  const uint8_t bytes[3] = {m.b1, m.b2, m.b3};
-  return ringSend(bytes, len);
+  uint8_t bytes[3];   // the same validation and masking as the USB-MIDI link
+  const size_t len = midiMessageBytes(status, d1, d2, bytes);
+  return len > 0 && ringSend(bytes, len);
 }
 
 void hostLinkLock() {

@@ -529,8 +529,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
 # Nowde 3 (#t-050 ①): the one SysEx -> USB-MIDI packetizer, src/usb_midi_packets.h, against the
 # hand-rolled builders it replaced -- tools/usb_midi_packets_test.cpp, the same way; and the receive
-# parse, src/midi_rx.h, against the inline one it replaced -- tools/midi_rx_test.cpp.
-for host_test in ('midi_schedule_test', 'usb_midi_packets_test', 'midi_rx_test'):
+# parse, src/midi_rx.h, against the inline one it replaced -- tools/midi_rx_test.cpp; and (②) the
+# serial link's wire, node bytes back through the stream parser -- tools/serial_link_test.cpp.
+for host_test in ('midi_schedule_test', 'usb_midi_packets_test', 'midi_rx_test', 'serial_link_test'):
     if not cxx:
         print(f"{host_test} SKIPPED: no host C++ compiler on PATH")
         continue

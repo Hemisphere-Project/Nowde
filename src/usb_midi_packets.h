@@ -48,6 +48,22 @@ inline bool usbMidiMessagePacket(uint8_t status, uint8_t d1, uint8_t d2, UsbMidi
   return false;   // F0, F4, F5, F7, or not a status byte
 }
 
+// The same short message as plain MIDI bytes, for the serial links (UART, CDC): the packet's
+// bytes, as many as the message carries -- 1 for real-time and F6, 2 for F1 / F3 / program change /
+// channel pressure, 3 otherwise; status first, no running status. Same validation and masking as
+// usbMidiMessagePacket(). Returns the count written to out[0..2], 0 for what it refuses.
+inline size_t midiMessageBytes(uint8_t status, uint8_t d1, uint8_t d2, uint8_t out[3]) {
+  UsbMidiPacket m;
+  if (!usbMidiMessagePacket(status, d1, d2, &m)) {
+    return 0;
+  }
+  out[0] = m.b1;
+  out[1] = m.b2;
+  out[2] = m.b3;
+  return (m.cin == 0x0F || m.cin == 0x05) ? 1
+       : (m.cin == 0x02 || m.cin == 0x0C || m.cin == 0x0D) ? 2 : 3;
+}
+
 template <typename Emit>
 inline bool usbMidiSysExPackets(const uint8_t* frame, size_t len, Emit emit) {
   size_t pos = 0;
