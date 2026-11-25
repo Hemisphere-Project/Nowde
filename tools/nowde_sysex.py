@@ -20,6 +20,8 @@ CMD_SET_LOSS_POLICY = 0x0D
 CMD_SET_ORIGIN = 0x0E
 CMD_MEDIA_SYNC = 0x10
 CMD_CHANGE_RECEIVER_LAYER = 0x11
+CMD_SET_LED = 0x13          # Nowde 3: this node's own pixel, not relayed despite the range
+CMD_IDENTIFY = 0x14         # Nowde 3: this node's own pixel, not relayed despite the range
 CMD_HELLO = 0x20
 CMD_CONFIG_STATE = 0x21
 CMD_RUNNING_STATE = 0x22
@@ -163,6 +165,21 @@ def set_origin(mac=None):
     if mac is None:
         return [MANUFACTURER, CMD_SET_ORIGIN]
     return [MANUFACTURER, CMD_SET_ORIGIN] + encode7(list(mac))
+
+
+LED_PIN_NONE = 0x7F
+
+
+def set_led(pin=None, brightness=16, dark=False):
+    """Nowde 3: the status pixel's pin (None = no pixel), brightness 0..127 (low by default) and
+    the show-dark flag (off except errors and an identify). NVS, live; answers CONFIG_STATE."""
+    pin = LED_PIN_NONE if pin is None else int(pin)
+    return [MANUFACTURER, CMD_SET_LED, pin & 0x7F, max(0, min(127, int(brightness))), 1 if dark else 0]
+
+
+def identify():
+    """Nowde 3: the pixel strobes white for 3 s, then blinks the hop count. No answer."""
+    return [MANUFACTURER, CMD_IDENTIFY]
 
 
 def media_sync(layer, index, position_ms, playing, volume=None, flags=None):
@@ -399,6 +416,8 @@ def parse(data):
         return name, {'layer': bytes(d).decode('ascii', 'ignore')}
     if cmd == CMD_SET_LOSS_POLICY and len(d) >= 1:
         return name, {'policy': 'stop' if d[0] else 'freewheel'}
+    if cmd == CMD_SET_LED and len(d) >= 3:
+        return name, {'pin': None if d[0] == LED_PIN_NONE else d[0], 'brightness': d[1], 'dark': d[2] == 1}
     if cmd == CMD_SET_ORIGIN:
         if len(d) >= 7:
             return name, {'origin': ':'.join('%02X' % b for b in decode7(d[0:7])[:6])}

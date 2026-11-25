@@ -37,6 +37,7 @@
 #include "nowde_state.h"
 #include "receiver_mode.h"
 #include "sender_mode.h"
+#include "status_led.h"
 #include "storage.h"
 #include "sysex.h"
 #include "ui.h"
@@ -342,6 +343,7 @@ void espnowTask(void* parameter) {
     meshClock.loop();
     hostClockTick();   // v2.1: MIDI-in master path
     uiTick();
+    statusLedTick(millis());
     vTaskDelay(pdMS_TO_TICKS(10));  // 10ms - good for ESP-NOW operations
   }
 }
@@ -394,6 +396,8 @@ void setup() {
   nodeRole = resolved;  // applyRole() runs after ESP-NOW is up
   DEBUG_SERIAL.printf("[INIT] Board id %u, role stored %u -> %s\r\n", boardId, storedRole,
                       resolved == NOWDE_ROLE_MASTER ? "MASTER" : resolved == NOWDE_ROLE_SLAVE ? "SLAVE" : "LEGACY");
+
+  statusLedInit();                // the boot flash starts here; the pixel follows the state from now
 
   // 2.0.1: carry the mesh-resync auto-reboot count across the reboot so it cannot boot-loop.
   resyncRebootCount = loadResyncRebootCount();

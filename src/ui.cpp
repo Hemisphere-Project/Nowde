@@ -13,14 +13,11 @@
 
 namespace {
 
-constexpr uint8_t LED_PIN = NOWDE_LED_PIN; // the board profile (nowde_config.h)
 constexpr unsigned long REFRESH_MS = 200;  // 5 Hz
-constexpr unsigned long HOLD_RESET_MS = 3000;
 
 bool hasDisplay = false;
 uint8_t page = 0;
 unsigned long lastRefresh = 0;
-bool holdArmed = true;
 char notice[24] = "";
 unsigned long noticeUntil = 0;
 
@@ -151,18 +148,8 @@ void drawInfoPage() {
   line(String("mesh  ") + String(meshClock.msSinceLastSync()) + "ms ago");
   line(String("free  ") + String(ESP.getFreeHeap() / 1024) + "k");
   line("");
-  line("hold 3s: reset NVS");
+  line("hold 3s: pin  10s: reset");
   d.endWrite();
-}
-
-void ledShow() {
-  bool blink;
-  Rgb c = statusColor(blink);
-  if (blink && ((millis() / 400) & 1)) {
-    rgbLedWrite(LED_PIN, 0, 0, 0);
-  } else {
-    rgbLedWrite(LED_PIN, c.r, c.g, c.b);
-  }
 }
 
 }  // namespace
@@ -189,9 +176,17 @@ void uiInit() {
     M5.Display.setTextSize(1);
     M5.Display.setCursor(4, 30);
     M5.Display.print("booting...");
-  } else {
-    rgbLedWrite(LED_PIN, 0, 0, 60);  // blue: booting
   }
+}
+
+bool uiHasDisplay() { return hasDisplay; }
+bool uiButtonPressed() { return M5.BtnA.isPressed(); }
+
+bool uiShortPress() {
+  if (!hasDisplay) return false;   // the AtomS3 Lite: a short press is identify (status_led.cpp)
+  page = (page + 1) % 2;
+  lastRefresh = 0;
+  return true;
 }
 
 uint8_t uiDetectBoard() {
@@ -215,30 +210,7 @@ void uiLog(const char* line) {
 void uiTick() {
   M5.update();
 
-  // Button: click = next page, 3 s hold = clear NVS (layer + role back to defaults) and reboot
-  if (M5.BtnA.wasClicked() && hasDisplay) {
-    page = (page + 1) % 2;
-    lastRefresh = 0;
-  }
-  if (M5.BtnA.pressedFor(HOLD_RESET_MS) && holdArmed) {
-    holdArmed = false;
-    DEBUG_SERIAL.println("[UI] Long press: clearing NVS and rebooting");
-    if (hasDisplay) {
-      M5.Display.fillScreen(TFT_RED);
-      M5.Display.setCursor(4, 50);
-      M5.Display.setTextColor(TFT_WHITE, TFT_RED);
-      M5.Display.setTextSize(2);
-      M5.Display.print("NVS RESET");
-    } else {
-      rgbLedWrite(LED_PIN, 80, 80, 80);
-    }
-    clearEEPROM();
-    delay(800);
-    esp_restart();
-  }
-  if (M5.BtnA.wasReleased()) {
-    holdArmed = true;
-  }
+  // BtnA is read by status_led.cpp (short = identify / next page, 3 s = pin, 10 s = clear NVS)
 
   unsigned long now = millis();
   if (now - lastRefresh < REFRESH_MS) {
@@ -248,8 +220,6 @@ void uiTick() {
 
   if (hasDisplay) {
     if (page == 0) drawStatusPage(); else drawInfoPage();
-  } else {
-    ledShow();
   }
 }
 
@@ -259,5 +229,8 @@ void uiInit() {}
 uint8_t uiDetectBoard() { return NOWDE_BOARD_ID; }
 void uiTick() {}
 void uiLog(const char* line) { (void)line; }
+bool uiHasDisplay() { return false; }
+bool uiButtonPressed() { return false; }  // status_led.cpp reads NOWDE_BUTTON_PIN itself
+bool uiShortPress() { return false; }
 
 #endif

@@ -78,9 +78,9 @@
   // board's USB-UART bridge, and the log rides it as LOG frames
   #define NOWDE_BOARD_NAME "atom"
   #define NOWDE_BOARD_ID NOWDE_BOARDID_ATOM
-  #define NOWDE_LED_KIND NOWDE_LED_WS2812        // SK6812, driven from ③
+  #define NOWDE_LED_KIND NOWDE_LED_WS2812        // SK6812
   #define NOWDE_LED_PIN 27
-  #define NOWDE_BUTTON_PIN 39                    // read from ③
+  #define NOWDE_BUTTON_PIN 39                    // external pull-up on the board
   #define NOWDE_SCREEN 0
   #define NOWDE_FLASH_MB 4
   #define NOWDE_HOST_LINK NOWDE_LINK_UART
@@ -91,9 +91,9 @@
   // any classic ESP32 module (DevKitC v4, clones), 4 MB: as the Atom, minus LED and button
   #define NOWDE_BOARD_NAME "esp32"
   #define NOWDE_BOARD_ID NOWDE_BOARDID_ESP32
-  #define NOWDE_LED_KIND NOWDE_LED_NONE          // clones: a mono LED on GPIO2, if any (③)
-  #define NOWDE_LED_PIN -1
-  #define NOWDE_BUTTON_PIN -1                    // BOOT, GPIO0: ③
+  #define NOWDE_LED_KIND NOWDE_LED_NONE          // clones: a mono LED on GPIO2 at most; SET_LED
+  #define NOWDE_LED_PIN -1                       // can point a WS2812 wired to any output pin
+  #define NOWDE_BUTTON_PIN 0                     // BOOT
   #define NOWDE_SCREEN 0
   #define NOWDE_FLASH_MB 4
   #define NOWDE_HOST_LINK NOWDE_LINK_UART
@@ -103,9 +103,9 @@
 #else
   #define NOWDE_BOARD_NAME "devkit"
   #define NOWDE_BOARD_ID NOWDE_BOARDID_DEVKIT
-  #define NOWDE_LED_KIND NOWDE_LED_NONE          // the WS2812 on GPIO48 (v1.0) / 38 (v1.1): ③
-  #define NOWDE_LED_PIN -1
-  #define NOWDE_BUTTON_PIN -1                    // BOOT, GPIO0: ③
+  #define NOWDE_LED_KIND NOWDE_LED_WS2812        // the WS2812 on GPIO48 (v1.0); a v1.1 has it on
+  #define NOWDE_LED_PIN 48                       // GPIO38: SET_LED 0x13 moves it
+  #define NOWDE_BUTTON_PIN 0                     // BOOT
   #define NOWDE_SCREEN 0
   #define NOWDE_FLASH_MB 16                      // N16R8, the AnnaTV model; an N8 needs its own env
   #ifndef NOWDE_HOST_LINK                        // env devkitc-uart / devkitc-cdc set it
@@ -131,6 +131,7 @@
   #define DEBUG_SERIAL Serial         // UART0
 #endif
 #define NOWDE_HAS_UI NOWDE_SCREEN
+#define NOWDE_LED_PIN_NONE 0x7F   // SET_LED / NVS: no status pixel
 
 // Board ids reported in HELLO / CONFIG_STATE
 #define NOWDE_BOARDID_UNKNOWN     0
@@ -337,6 +338,8 @@
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10
 #define SYSEX_CMD_CHANGE_RECEIVER_LAYER 0x11
+#define SYSEX_CMD_SET_LED 0x13           // Nowde 3: F0 7D 13 pin brightness(0-127) dark(0/1) F7 — NVS, live
+#define SYSEX_CMD_IDENTIFY 0x14          // Nowde 3: F0 7D 14 F7 — white strobe 3 s, then the hop count
 
 // Nowde → Bridge Responses (0x20-0x3F)
 #define SYSEX_CMD_HELLO 0x20

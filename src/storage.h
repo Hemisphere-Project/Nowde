@@ -13,6 +13,10 @@ uint8_t loadLrFromEEPROM();
 // NOWDE_STOP_ON_LINK_LOST. true = stop, false = freewheel.
 void saveLossPolicyToEEPROM(bool stop);
 bool loadLossPolicyFromEEPROM();
+// Nowde 3 (SET_LED 0x13): the status pixel's pin (NOWDE_LED_PIN_NONE = none), brightness 0..127
+// and show-dark flag; absent keys leave the caller's defaults (the board profile).
+void saveLedToEEPROM(uint8_t pin, uint8_t brightness, bool dark);
+void loadLedFromEEPROM(int8_t& pin, uint8_t& brightness, bool& dark);
 void clearEEPROM();
 
 // 2.0.1 mesh-resync self-heal: a persisted count of consecutive auto-reboots, so a poisoned

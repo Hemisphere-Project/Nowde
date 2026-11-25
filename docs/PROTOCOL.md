@@ -48,6 +48,8 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `0D` | SET_LOSS_POLICY *(v2.2)* | `F0 7D 0D stop(1) F7` | `1` stop, `0` freewheel, when the `MEDIA_SYNC` stream dies. Stored in NVS and applied **live** — no restart, unlike `SET_LR`. Answers `CONFIG_STATE`. Which one a node wants is a property of where it stands, so it stopped being a build flag. |
 | `70` | SET_NEIGHBOURS *(2.4, bench builds only)* | `F0 7D 70 [n × mac(6), 7-bit packed] F7`, n ≤ 8 | Only in builds with `-DNOWDE_BENCH_NEIGHBOURS` (envs `devkit-meshmask`, `atoms3-meshmask`): every ESP-NOW frame from a MAC not listed — the clock's `MCK` included — is dropped before dispatch, so three nodes on one desk play a relay chain. `n = 0` accepts everyone. RAM only; answers `HELLO`. Every other build answers `ERROR_REPORT 02` with the command byte as context. Never on an installation. |
 | `0E` | SET_ORIGIN *(v2.2)* | `F0 7D 0E [mac(6→7)] F7` | With a MAC: **pins** the origin lock to that master and holds it through any silence. Without one (`F0 7D 0E F7`, 4 bytes): releases the lock, and the next `MediaSyncPacket` heard adopts its sender. Answers `CONFIG_STATE`. Not stored — a lock is a live fact, not a config. |
+| `13` | SET_LED *(Nowde 3)* | `F0 7D 13 pin(1) brightness(1) dark(1) F7` | This node's status pixel (a WS2812/SK6812): `pin` its GPIO, `7F` = no pixel; `brightness` `0`–`127` (default `16`: low); `dark` `1` = show-dark, the pixel stays off except for errors and an identify. Defaults per board: DevKitC-1 GPIO48 (a v1.1 board wants `38`), AtomS3 Lite 35, M5 Atom 27, a generic ESP32 none. Stored in NVS, applied live; answers `CONFIG_STATE`. A pin that is not an output, or the button's, answers `ERROR_REPORT 01`. For this node only — never relayed, though its id sits in the `0x10` range. |
+| `14` | IDENTIFY *(Nowde 3)* | `F0 7D 14 F7` | The pixel strobes white for 3 s, then blinks the hop count to the sender (none yet: the hop count arrives with the range work). Same as a short press on the button. No answer. For this node only — never relayed. |
 
 ### Host → slaves, relayed by the master (`0x10`–`0x1F`)
 
@@ -545,8 +547,13 @@ generic classic ESP32).
 - **AtomS3 LCD**, page 0: role banner (coloured like the LED code below), mesh state,
   slaves / masters seen, host link, layer, media index + position, version + channel.
   Page 1 (click): board, role source (auto / nvs), MAC, uptime, mesh age, free heap.
-- **AtomS3 Lite LED**: blue booting · purple master without host · yellow blink no
-  peer (master: no slave; slave: no master) · cyan synced idle · green synced playing ·
-  red link lost while playing · orange mesh clock lost · magenta OTA.
-- **Button**: click = next page; hold 3 s = clear NVS (layer + role back to defaults) and
-  reboot. Role changes are SysEx-only on purpose (`SET_ROLE`).
+- **Status pixel** *(Nowde 3: AtomS3 Lite, DevKitC-1, M5 Atom; `SET_LED` moves or darkens
+  it)*, highest first: identify = white strobe 3 s then the hop count · error = red flashes ·
+  OTA = purple pulse · boot = one white flash · *(show-dark: off from here)* · pin conflict =
+  blue/red · sender = blue · standby = blue slow blink · no layer (`-`) = dim cyan · link lost,
+  freewheeling = amber fast blink · alone or not locked yet = dim white breathe · slave, clock
+  coarse = green double blink · slave locked = green. Low brightness (16 of 127) by default.
+- **Button** *(Nowde 3: BtnA on the AtomS3s, BOOT on the DevKits and ESP32, GPIO39 on the
+  Atom)*: short press = identify (on the AtomS3 LCD: next page) · hold 3 s = pin this node
+  as master, or unpin it back to auto (`SET_ROLE` 1 ↔ 7F) · hold 10 s = clear NVS (layer,
+  role, LED back to defaults) and reboot. *(2.x: 3 s cleared NVS.)*

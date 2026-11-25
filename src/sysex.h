@@ -3,6 +3,8 @@
 #include <Arduino.h>
 
 void sendHello();
+// SET_ROLE 0x08 and the button's 3 s hold: store, resolve, apply, then HELLO + CONFIG_STATE.
+void setStoredRole(uint8_t role);
 // 2.4: length is uint16_t -- the USB-MIDI assembler holds up to 512 B (midi.cpp), and a uint8_t
 // silently wrapped any frame over 255 B into a short, mis-parsed one.
 void handleSysExMessage(const uint8_t* data, uint16_t length);

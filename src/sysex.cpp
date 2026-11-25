@@ -17,6 +17,7 @@
 #include "nowde_state.h"
 #include "receiver_mode.h"
 #include "sender_mode.h"
+#include "status_led.h"
 #include "storage.h"
 #include "watchdog.h"
 #include "host_clock.h"
@@ -644,22 +645,25 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
           sendErrorReport(ERROR_CONFIG_INVALID, &role, 1);
           break;
         }
-        storedRole = role;
-        saveRoleToEEPROM(role);
-        uint8_t resolved = role;
-        if (role == NOWDE_ROLE_AUTO) {
-          resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
-                   : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
-                   : NOWDE_ROLE_LEGACY;
-        }
-        applyRole(resolved);
-        DEBUG_SERIAL.printf("[SET_ROLE] stored=%u resolved=%u\r\n", role, resolved);
-        sendHello();
-        delay(50);
-        sendConfigState();
+        setStoredRole(role);
       } else {
         sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
       }
+      break;
+
+    case SYSEX_CMD_SET_LED:
+      // Nowde 3 — Format: F0 7D 13 [pin] [brightness 0-127] [dark 0/1] F7 ; pin 7F = no pixel.
+      // Stored in NVS, applied live; answers CONFIG_STATE.
+      if (length >= 7 && data[4] <= 127 && data[5] <= 1 && statusLedConfigure(data[3], data[4], data[5] == 1)) {
+        sendConfigState();
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, length >= 4 ? &data[3] : nullptr, length >= 4 ? 1 : 0);
+      }
+      break;
+
+    case SYSEX_CMD_IDENTIFY:
+      // Nowde 3 — Format: F0 7D 14 F7 ; the status pixel strobes white 3 s, then blinks the hop count
+      statusLedIdentify();
       break;
 
     case SYSEX_CMD_SET_NEIGHBOURS:
@@ -787,6 +791,22 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
 }
 
 // ============= HELPER FUNCTIONS =============
+
+void setStoredRole(uint8_t role) {
+  storedRole = role;
+  saveRoleToEEPROM(role);
+  uint8_t resolved = role;
+  if (role == NOWDE_ROLE_AUTO) {
+    resolved = (boardId == NOWDE_BOARDID_ATOMS3) ? NOWDE_ROLE_MASTER
+             : (boardId == NOWDE_BOARDID_ATOMS3_LITE) ? NOWDE_ROLE_SLAVE
+             : NOWDE_ROLE_LEGACY;
+  }
+  applyRole(resolved);
+  DEBUG_SERIAL.printf("[SET_ROLE] stored=%u resolved=%u\r\n", role, resolved);
+  sendHello();
+  delay(50);
+  sendConfigState();
+}
 
 void sendHello() {
   // Format: F0 7D 20 [version(8,encoded:10)] [uptimeMs(4,encoded:5)] [bootReason(1)] [role(1)] [board(1)]

@@ -82,6 +82,26 @@ bool loadLossPolicyFromEEPROM() {
   return v != 0;
 }
 
+void saveLedToEEPROM(uint8_t pin, uint8_t brightness, bool dark) {
+  preferences.begin("nowde", false);
+  preferences.putUChar("ledpin", pin);
+  preferences.putUChar("ledbr", brightness);
+  preferences.putBool("leddark", dark);
+  preferences.end();
+}
+
+void loadLedFromEEPROM(int8_t& pin, uint8_t& brightness, bool& dark) {
+  if (!preferences.begin("nowde", true)) return;
+  if (preferences.isKey("ledpin")) {
+    uint8_t p = preferences.getUChar("ledpin", NOWDE_LED_PIN_NONE);
+    pin = p == NOWDE_LED_PIN_NONE ? -1 : (int8_t)p;
+  }
+  uint8_t b = preferences.getUChar("ledbr", brightness);
+  brightness = b > 127 ? brightness : b;
+  dark = preferences.getBool("leddark", dark);
+  preferences.end();
+}
+
 void clearEEPROM() {
   preferences.begin("nowde", false);
   preferences.clear();

@@ -505,6 +505,12 @@ def cfg_int(name):
     return int(m.group(1))
 
 
+def cfg_int_hex(name):
+    m = re.search(rf'^\s*#define {name}\s+(0x[0-9A-Fa-f]+|\d+)\b', cfg, re.M)
+    check(m, f"nowde_config.h defines {name}")
+    return int(m.group(1), 0)
+
+
 # 2.4: what the HELLO trailer, the version field and ESP-NOW's peer table hold, read from the C.
 check(cfg_int('NOWDE_HELLO_GEN') == 2 and cfg_int('NOWDE_NODE_ID_LEN') == nx.NODE_ID_LEN,
       "nowde_config.h HELLO gen + node id match the codec")
@@ -524,6 +530,15 @@ lead = cfg_int('MAX_HOPS') * cfg_int('MESH_RELAY_DELAY_MAX_MS')
 check(lead == 90, f"the lead the schedule is sized on is 90 ms ({lead})")
 depth = (lead // cfg_int('MIDI_EVENT_BATCH_MS') + 1) * nm.MIDI_EVENT_MAX_NEW
 check(depth == 266, f"schedule depth is 266 records ({depth})")
+
+# Nowde 3 (#t-050 ③): SET_LED / IDENTIFY, the codec against the firmware's ids and its own parse.
+check(cfg_int_hex('SYSEX_CMD_SET_LED') == nx.CMD_SET_LED and cfg_int_hex('SYSEX_CMD_IDENTIFY') == nx.CMD_IDENTIFY,
+      "nowde_config.h SET_LED / IDENTIFY ids match the codec")
+check(cfg_int_hex('NOWDE_LED_PIN_NONE') == nx.LED_PIN_NONE, "nowde_config.h NOWDE_LED_PIN_NONE matches the codec")
+check(nx.set_led(48, 16, False) == [0x7D, 0x13, 48, 16, 0] and nx.identify() == [0x7D, 0x14],
+      "SET_LED / IDENTIFY frames")
+check(nx.parse(nx.set_led(None, 200, True))
+      == ('SET_LED', {'pin': None, 'brightness': 127, 'dark': True}), "SET_LED parses back, clamped")
 
 here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
