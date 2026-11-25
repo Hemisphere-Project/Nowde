@@ -98,6 +98,39 @@ int main() {
     check(!ok && sent == 3, "queue full: stop at the failing packet, report false");
   }
 
-  std::printf("usb_midi_packets host test OK (frames 2..512 B)\n");
+  // Short messages: the packets the old builders wrote (midiSendCC, the MTC quarter frame,
+  // sendRealtime, midi_event's playRecord), for every status they used and every data value.
+  for (int status = 0x80; status <= 0xEF; status++) {
+    for (int d = 0; d < 256; d += 5) {
+      const uint8_t kind = static_cast<uint8_t>(status & 0xF0);
+      UsbMidiPacket m;
+      check(usbMidiMessagePacket(static_cast<uint8_t>(status), static_cast<uint8_t>(d),
+                                 static_cast<uint8_t>(255 - d), &m), "channel voice is a message");
+      // playRecord / midiSendCC
+      check(m.cin == (kind >> 4) && m.b1 == status && m.b2 == (d & 0x7F)
+                && m.b3 == ((kind == 0xC0 || kind == 0xD0) ? 0 : ((255 - d) & 0x7F)),
+            "channel voice: the playRecord / midiSendCC packet");
+    }
+  }
+  for (int piece = 0; piece < 8; piece++) {
+    for (int nibble = 0; nibble < 16; nibble++) {
+      UsbMidiPacket m;
+      const uint8_t qf = static_cast<uint8_t>((piece << 4) | nibble);
+      check(usbMidiMessagePacket(0xF1, qf, 0, &m) && m.cin == 0x02 && m.b1 == 0xF1 && m.b2 == qf
+                && m.b3 == 0, "MTC quarter frame: CIN 2, F1, the piece");
+    }
+  }
+  for (int rt = 0xF8; rt <= 0xFF; rt++) {
+    UsbMidiPacket m;
+    check(usbMidiMessagePacket(static_cast<uint8_t>(rt), 0x55, 0x66, &m) && m.cin == 0x0F && m.b1 == rt
+              && m.b2 == 0 && m.b3 == 0, "real-time: CIN F, one byte");
+  }
+  {
+    UsbMidiPacket m;
+    check(!usbMidiMessagePacket(0xF0, 0, 0, &m) && !usbMidiMessagePacket(0xF7, 0, 0, &m)
+              && !usbMidiMessagePacket(0x40, 0, 0, &m), "SysEx bytes and data bytes are not messages");
+  }
+
+  std::printf("usb_midi_packets host test OK (frames 2..512 B, short messages)\n");
   return 0;
 }

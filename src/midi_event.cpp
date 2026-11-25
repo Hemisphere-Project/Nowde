@@ -295,15 +295,10 @@ bool evSeqFresh(const uint8_t* origin, uint16_t evSeq) {
   return true;
 }
 
-// Rule 5: re-emit on the record's own channel. Channel voice: USB-MIDI CIN = the status nibble.
+// Rule 5: re-emit on the record's own channel (channel voice: CIN = the status nibble, in
+// usb_midi_packets.h).
 void playRecord(uint8_t status, uint8_t data1, uint8_t data2) {
-  uint8_t kind = status & 0xF0;
-  midiEventPacket_t packet;
-  packet.header = kind >> 4;
-  packet.byte1 = status;
-  packet.byte2 = data1 & 0x7F;
-  packet.byte3 = (kind == 0xC0 || kind == 0xD0) ? 0 : (data2 & 0x7F);
-  usbOutMidi(packet);
+  usbOutMessage(status, data1, data2);
 }
 
 void playScheduled(const ScheduledEvent& e) {

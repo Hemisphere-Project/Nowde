@@ -111,6 +111,16 @@ bool usbOutSysEx(const uint8_t* frame, size_t len) {
   return ok;
 }
 
+bool usbOutMessage(uint8_t status, uint8_t d1, uint8_t d2) {
+  UsbMidiPacket m;
+  if (!usbMidiMessagePacket(status, d1, d2, &m)) {
+    return false;
+  }
+  midiEventPacket_t p = {};
+  p.header = m.cin; p.byte1 = m.b1; p.byte2 = m.b2; p.byte3 = m.b3;
+  return usbOutMidi(p);
+}
+
 void usbOutLock() {
   if (frameLock && !xPortInIsrContext()) {
     xSemaphoreTake(frameLock, portMAX_DELAY);

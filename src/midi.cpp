@@ -35,12 +35,7 @@ void midiInit() {
 }
 
 void midiSendCC(uint8_t cc, uint8_t value) {
-  midiEventPacket_t p;
-  p.header = 0x0B;          // CIN: control change
-  p.byte1 = 0xB0;           // channel 1
-  p.byte2 = cc & 0x7F;
-  p.byte3 = value & 0x7F;
-  midiWritePacket(p);
+  usbOutMessage(0xB0, cc, value);   // control change, channel 1
   DEBUG_SERIAL.printf("[MIDI TX] CC#%d = %d (channel 1)\r\n", cc, value);
 }
 
@@ -56,12 +51,7 @@ void midiSendTimeCode(uint32_t positionMs) {
   Smpte t = toSmpte(positionMs);
 
   auto sendQuarterFrame = [&](uint8_t piece, uint8_t nibble) {
-    midiEventPacket_t packet;
-    packet.header = 0x02;
-    packet.byte1 = 0xF1;
-    packet.byte2 = static_cast<uint8_t>((piece << 4) | (nibble & 0x0F));
-    packet.byte3 = 0;
-    midiWritePacket(packet);
+    usbOutMessage(0xF1, static_cast<uint8_t>((piece << 4) | (nibble & 0x0F)));
   };
 
   usbOutLock();   // the 8 pieces stay contiguous in the queue
@@ -95,12 +85,7 @@ void midiSendFullFrame(uint32_t positionMs) {
 }
 
 static void sendRealtime(uint8_t status) {
-  midiEventPacket_t p;
-  p.header = 0x0F;  // single-byte system real-time
-  p.byte1 = status;
-  p.byte2 = 0;
-  p.byte3 = 0;
-  midiWritePacket(p);
+  usbOutMessage(status);   // single-byte system real-time
 }
 
 void midiSendStart() {
@@ -111,11 +96,6 @@ void midiSendStart() {
 void midiSendStop() {
   sendRealtime(0xFC);
   DEBUG_SERIAL.println("[MIDI TX] Stop");
-}
-
-void midiWritePacket(midiEventPacket_t& packet) {
-  // Queued: only the MIDI task touches TinyUSB (usb_out.h)
-  usbOutMidi(packet);
 }
 
 bool midiReadPacket(midiEventPacket_t* packet) {

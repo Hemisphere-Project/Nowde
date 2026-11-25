@@ -14,6 +14,40 @@
 //
 // `emit(cin, b1, b2, b3)` returns false when the packet could not be queued: the frame stops
 // there, and the host parser drops the unterminated frame at the next F0.
+// One short MIDI message -- the internal type is plain MIDI bytes, status first -- as its USB-MIDI
+// packet. Channel voice: CIN = the status nibble, program change and channel pressure carry one
+// data byte. System common F1/F3 (MTC quarter frame, song select): CIN 2; F2 (song position): CIN 3;
+// F6: CIN 5. Real-time F8..FF: CIN F. Data bytes are masked to 7 bits, unused ones are zero.
+// Not for SysEx (F0/F7): a frame goes through usbMidiSysExPackets(). Returns false for those.
+struct UsbMidiPacket {
+  uint8_t cin, b1, b2, b3;
+};
+
+inline bool usbMidiMessagePacket(uint8_t status, uint8_t d1, uint8_t d2, UsbMidiPacket* out) {
+  out->b1 = status;
+  out->b2 = 0;
+  out->b3 = 0;
+  if (status >= 0x80 && status < 0xF0) {
+    const uint8_t kind = status & 0xF0;
+    out->cin = kind >> 4;
+    out->b2 = d1 & 0x7F;
+    out->b3 = (kind == 0xC0 || kind == 0xD0) ? 0 : (d2 & 0x7F);
+    return true;
+  }
+  switch (status) {
+    case 0xF1:
+    case 0xF3: out->cin = 0x02; out->b2 = d1 & 0x7F; return true;
+    case 0xF2: out->cin = 0x03; out->b2 = d1 & 0x7F; out->b3 = d2 & 0x7F; return true;
+    case 0xF6: out->cin = 0x05; return true;
+    default: break;
+  }
+  if (status >= 0xF8) {
+    out->cin = 0x0F;
+    return true;
+  }
+  return false;   // F0, F4, F5, F7, or not a status byte
+}
+
 template <typename Emit>
 inline bool usbMidiSysExPackets(const uint8_t* frame, size_t len, Emit emit) {
   size_t pos = 0;
