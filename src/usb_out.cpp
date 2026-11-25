@@ -7,6 +7,7 @@
 
 #include "nowde_config.h"
 #include "nowde_state.h"
+#include "usb_midi_packets.h"
 
 namespace {
 constexpr size_t MIDI_QUEUE_PACKETS = 1024;  // RUNNING_STATE bursts are ~120 packets per slave chunk
@@ -34,26 +35,7 @@ void enqueueLogFrame(const char* text, size_t len) {
     msg[n++] = static_cast<uint8_t>(text[i]) & 0x7F;
   }
   msg[n++] = SYSEX_END;
-
-  usbOutLock();
-  size_t pos = 0;
-  while (pos < n) {
-    midiEventPacket_t p = {};
-    size_t remaining = n - pos;
-    if (remaining > 3) {
-      p.header = 0x04; p.byte1 = msg[pos]; p.byte2 = msg[pos + 1]; p.byte3 = msg[pos + 2]; pos += 3;
-    } else if (remaining == 3) {
-      p.header = 0x07; p.byte1 = msg[pos]; p.byte2 = msg[pos + 1]; p.byte3 = msg[pos + 2]; pos += 3;
-    } else if (remaining == 2) {
-      p.header = 0x06; p.byte1 = msg[pos]; p.byte2 = msg[pos + 1]; pos += 2;
-    } else {
-      p.header = 0x05; p.byte1 = msg[pos]; pos += 1;
-    }
-    if (!usbOutMidi(p)) {
-      break;   // queue full: the line is lost, the host parser drops the truncated frame
-    }
-  }
-  usbOutUnlock();
+  usbOutSysEx(msg, n);   // queue full: the line is lost, the host parser drops the truncated frame
 }
 
 void pumpLog() {
@@ -116,6 +98,17 @@ bool usbOutMidi(const midiEventPacket_t& packet) {
     return xQueueSendFromISR(midiQueue, &packet, &woken) == pdTRUE;
   }
   return xQueueSend(midiQueue, &packet, 0) == pdTRUE;
+}
+
+bool usbOutSysEx(const uint8_t* frame, size_t len) {
+  usbOutLock();
+  bool ok = usbMidiSysExPackets(frame, len, [](uint8_t cin, uint8_t b1, uint8_t b2, uint8_t b3) {
+    midiEventPacket_t p = {};
+    p.header = cin; p.byte1 = b1; p.byte2 = b2; p.byte3 = b3;
+    return usbOutMidi(p);
+  });
+  usbOutUnlock();
+  return ok;
 }
 
 void usbOutLock() {

@@ -873,89 +873,13 @@ void sendHello() {
   
   DEBUG_SERIAL.printf("[HELLO] Sending %d bytes\r\n", idx);
   
-  // Send via USB MIDI
-  usbOutLock();
-  int pos = 0;
-  while (pos < idx) {
-    midiEventPacket_t packet;
-    memset(&packet, 0, sizeof(packet));
-    
-    bool hasEnd = false;
-    int endPos = -1;
-    for (int i = 0; i < 3 && (pos + i) < idx; i++) {
-      if (message[pos + i] == SYSEX_END) {
-        hasEnd = true;
-        endPos = i;
-        break;
-      }
-    }
-    
-    if (hasEnd) {
-      if (endPos == 0) {
-        packet.header = 0x05;
-        packet.byte1 = message[pos];
-        packet.byte2 = 0;
-        packet.byte3 = 0;
-      } else if (endPos == 1) {
-        packet.header = 0x06;
-        packet.byte1 = message[pos];
-        packet.byte2 = message[pos + 1];
-        packet.byte3 = 0;
-      } else {
-        packet.header = 0x07;
-        packet.byte1 = message[pos];
-        packet.byte2 = message[pos + 1];
-        packet.byte3 = message[pos + 2];
-      }
-      pos += endPos + 1;
-    } else {
-      packet.header = 0x04;
-      packet.byte1 = message[pos];
-      packet.byte2 = (pos + 1 < idx) ? message[pos + 1] : 0;
-      packet.byte3 = (pos + 2 < idx) ? message[pos + 2] : 0;
-      pos += 3;
-    }
-    
-    midiWritePacket(packet);
-  }
-  usbOutUnlock();
+  usbOutSysEx(message, idx);
   
   DEBUG_SERIAL.println("[HELLO] Sent to Bridge");
 }
 
 void sendSysExBytes(const uint8_t* message, int len) {
-  // Chunk a complete F0..F7 frame into USB-MIDI packets (CIN 4/5/6/7)
-  usbOutLock();
-  int pos = 0;
-  while (pos < len) {
-    midiEventPacket_t packet;
-    memset(&packet, 0, sizeof(packet));
-    int remaining = len - pos;
-    if (remaining > 3) {
-      packet.header = 0x04;
-      packet.byte1 = message[pos];
-      packet.byte2 = message[pos + 1];
-      packet.byte3 = message[pos + 2];
-      pos += 3;
-    } else if (remaining == 3) {
-      packet.header = 0x07;
-      packet.byte1 = message[pos];
-      packet.byte2 = message[pos + 1];
-      packet.byte3 = message[pos + 2];
-      pos += 3;
-    } else if (remaining == 2) {
-      packet.header = 0x06;
-      packet.byte1 = message[pos];
-      packet.byte2 = message[pos + 1];
-      pos += 2;
-    } else {
-      packet.header = 0x05;
-      packet.byte1 = message[pos];
-      pos += 1;
-    }
-    midiWritePacket(packet);
-  }
-  usbOutUnlock();
+  usbOutSysEx(message, static_cast<size_t>(len));
 }
 
 void sendConfigState() {
@@ -1128,52 +1052,7 @@ void sendRunningState() {
     message[msgIdx++] = SYSEX_END;
     int totalLen = msgIdx;
 
-    // Send via USB MIDI (chunk into packets)
-    int pos = 0;
-    while (pos < totalLen) {
-      midiEventPacket_t packet;
-      memset(&packet, 0, sizeof(packet));
-
-      bool hasEnd = false;
-      int endPos = -1;
-      for (int i = 0; i < 3 && (pos + i) < totalLen; i++) {
-        if (message[pos + i] == SYSEX_END) {
-          hasEnd = true;
-          endPos = i;
-          break;
-        }
-      }
-
-      if (hasEnd) {
-        if (endPos == 0) {
-          packet.header = 0x05;
-          packet.byte1 = message[pos];
-          pos++;
-          packet.byte2 = 0;
-          packet.byte3 = 0;
-        } else if (endPos == 1) {
-          packet.header = 0x06;
-          packet.byte1 = message[pos];
-          packet.byte2 = message[pos + 1];
-          pos += 2;
-          packet.byte3 = 0;
-        } else {
-          packet.header = 0x07;
-          packet.byte1 = message[pos];
-          packet.byte2 = message[pos + 1];
-          packet.byte3 = message[pos + 2];
-          pos += 3;
-        }
-      } else {
-        packet.header = 0x04;
-        packet.byte1 = message[pos];
-        pos++;
-        packet.byte2 = (pos < totalLen) ? message[pos++] : 0;
-        packet.byte3 = (pos < totalLen) ? message[pos++] : 0;
-      }
-
-      midiWritePacket(packet);
-    }
+    usbOutSysEx(message, static_cast<size_t>(totalLen));
   }
 }
 
@@ -1195,37 +1074,7 @@ void sendErrorReport(uint8_t errorCode, const uint8_t* context, uint8_t contextL
   
   message[idx++] = SYSEX_END;
   
-  // Send via USB MIDI
-  int pos = 0;
-  while (pos < idx) {
-    midiEventPacket_t packet;
-    
-    if (pos == 0) {
-      packet.header = 0x04;
-      packet.byte1 = message[pos++];
-      packet.byte2 = (pos < idx) ? message[pos++] : 0;
-      packet.byte3 = (pos < idx) ? message[pos++] : 0;
-    } else if (pos >= idx - 1 && message[idx - 1] == SYSEX_END) {
-      if (pos == idx - 1) {
-        packet.header = 0x05;
-        packet.byte1 = message[pos++];
-        packet.byte2 = 0;
-        packet.byte3 = 0;
-      } else {
-        packet.header = 0x06;
-        packet.byte1 = message[pos++];
-        packet.byte2 = (pos < idx) ? message[pos++] : 0;
-        packet.byte3 = 0;
-      }
-    } else {
-      packet.header = 0x04;
-      packet.byte1 = message[pos++];
-      packet.byte2 = (pos < idx) ? message[pos++] : 0;
-      packet.byte3 = (pos < idx) ? message[pos++] : 0;
-    }
-    
-    midiWritePacket(packet);
-  }
+  usbOutSysEx(message, static_cast<size_t>(idx));
   
   const char* errorName = "UNKNOWN";
   switch (errorCode) {

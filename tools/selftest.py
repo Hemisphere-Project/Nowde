@@ -449,15 +449,18 @@ check(depth == 266, f"schedule depth is 266 records ({depth})")
 
 here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
-if not cxx:
-    print("midi_schedule host test SKIPPED: no host C++ compiler on PATH")
-else:
+# Nowde 3 (#t-050 ①): the one SysEx -> USB-MIDI packetizer, src/usb_midi_packets.h, against the
+# hand-rolled builders it replaced -- tools/usb_midi_packets_test.cpp, the same way.
+for host_test in ('midi_schedule_test', 'usb_midi_packets_test'):
+    if not cxx:
+        print(f"{host_test} SKIPPED: no host C++ compiler on PATH")
+        continue
     with tempfile.TemporaryDirectory() as tmp:
-        exe = os.path.join(tmp, 'midi_schedule_test')
+        exe = os.path.join(tmp, host_test)
         build = subprocess.run([cxx, '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
-                                os.path.join(here, 'midi_schedule_test.cpp')],
+                                os.path.join(here, host_test + '.cpp')],
                                capture_output=True, text=True)
-        check(build.returncode == 0, f"midi_schedule_test builds:\n{build.stderr}")
+        check(build.returncode == 0, f"{host_test} builds:\n{build.stderr}")
         run = subprocess.run([exe], capture_output=True, text=True)
-        check(run.returncode == 0, f"midi_schedule_test:\n{run.stdout}{run.stderr}")
+        check(run.returncode == 0, f"{host_test}:\n{run.stdout}{run.stderr}")
         print(run.stdout.strip())

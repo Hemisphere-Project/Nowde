@@ -17,6 +17,10 @@
 
 void usbOutInit();                                 // before anything logs or sends
 bool usbOutMidi(const midiEventPacket_t& packet);  // queue one USB-MIDI packet (false = queue full)
+// Queue one complete F0..F7 frame as USB-MIDI packets (CIN 4, then 5/6/7 on the last), contiguous
+// in the queue. The ONE SysEx packetizer: every frame to the host goes through here (Nowde 3's
+// HostLink::send). Queue full mid-frame: stops there, the host parser drops the unterminated frame.
+bool usbOutSysEx(const uint8_t* frame, size_t len);
 void usbOutLock();                                 // hold while enqueueing a multi-packet message
 void usbOutUnlock();                               //   so it stays contiguous in the queue
 void usbOutPump();                                 // MIDI task only: drain to TinyUSB

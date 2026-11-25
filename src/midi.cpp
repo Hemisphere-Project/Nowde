@@ -90,13 +90,7 @@ void midiSendFullFrame(uint32_t positionMs) {
   const uint8_t msg[10] = {0xF0, 0x7F, 0x7F, 0x01, 0x01,
                            static_cast<uint8_t>((3 << 5) | (t.hours & 0x1F)),
                            t.minutes, t.seconds, t.frames, 0xF7};
-  midiEventPacket_t p;
-  usbOutLock();
-  p.header = 0x04; p.byte1 = msg[0]; p.byte2 = msg[1]; p.byte3 = msg[2]; midiWritePacket(p);
-  p.header = 0x04; p.byte1 = msg[3]; p.byte2 = msg[4]; p.byte3 = msg[5]; midiWritePacket(p);
-  p.header = 0x04; p.byte1 = msg[6]; p.byte2 = msg[7]; p.byte3 = msg[8]; midiWritePacket(p);
-  p.header = 0x05; p.byte1 = msg[9]; p.byte2 = 0;      p.byte3 = 0;      midiWritePacket(p);
-  usbOutUnlock();
+  usbOutSysEx(msg, sizeof(msg));
   DEBUG_SERIAL.printf("[MIDI TX] MTC full-frame %02d:%02d:%02d:%02d\r\n", t.hours, t.minutes, t.seconds, t.frames);
 }
 
