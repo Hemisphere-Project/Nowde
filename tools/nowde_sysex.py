@@ -21,6 +21,7 @@ CMD_SET_ORIGIN = 0x0E
 CMD_CLAIM = 0x0F            # Nowde 3: the host claims this node as the sender (election)
 CMD_MEDIA_SYNC = 0x10
 CMD_CHANGE_RECEIVER_LAYER = 0x11
+CMD_SET_MESH = 0x12         # Nowde 3: this node's mesh id (admission), not relayed despite the range
 CMD_SET_LED = 0x13          # Nowde 3: this node's own pixel, not relayed despite the range
 CMD_IDENTIFY = 0x14         # Nowde 3: this node's own pixel, not relayed despite the range
 CMD_HELLO = 0x20
@@ -176,6 +177,19 @@ def set_led(pin=None, brightness=16, dark=False):
     the show-dark flag (off except errors and an identify). NVS, live; answers CONFIG_STATE."""
     pin = LED_PIN_NONE if pin is None else int(pin)
     return [MANUFACTURER, CMD_SET_LED, pin & 0x7F, max(0, min(127, int(brightness))), 1 if dark else 0]
+
+
+MESH_OPEN = 0
+MESH_MAX = 0x3FFF
+
+
+def set_mesh(mesh_id=MESH_OPEN):
+    """Nowde 3: this node's mesh id, 1..0x3FFF, 0 = open (hears every mesh). Two nodes hear each
+    other unless both carry a non-zero id and the ids differ. NVS, live; answers CONFIG_STATE."""
+    mesh_id = int(mesh_id)
+    if not MESH_OPEN <= mesh_id <= MESH_MAX:
+        raise ValueError(f"mesh id {mesh_id} out of 0..{MESH_MAX}")
+    return [MANUFACTURER, CMD_SET_MESH, mesh_id & 0x7F, (mesh_id >> 7) & 0x7F]
 
 
 def identify():
@@ -423,6 +437,8 @@ def parse(data):
         return name, {'layer': bytes(d).decode('ascii', 'ignore')}
     if cmd == CMD_SET_LOSS_POLICY and len(d) >= 1:
         return name, {'policy': 'stop' if d[0] else 'freewheel'}
+    if cmd == CMD_SET_MESH and len(d) >= 2:
+        return name, {'mesh': (d[0] & 0x7F) | ((d[1] & 0x7F) << 7)}
     if cmd == CMD_SET_LED and len(d) >= 3:
         return name, {'pin': None if d[0] == LED_PIN_NONE else d[0], 'brightness': d[1], 'dark': d[2] == 1}
     if cmd == CMD_SET_ORIGIN:

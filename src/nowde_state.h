@@ -26,6 +26,9 @@ extern uint8_t boardId;
 extern bool lrEnabled;
 // 2.4: which LR rate (NOWDE_LR_*); lrEnabled == (lrMode != NOWDE_LR_OFF).
 extern uint8_t lrMode;
+// Nowde 3 admission (#t-050 ⑤, src/mesh_admit.h): this node's mesh id, 0 = open. SET_MESH 0x12
+// writes it (NVS, live), the beacon carries it, the receive callback drops other meshes.
+extern volatile uint16_t nowdeMeshId;
 // 2.4: the last frame heard straight from the locked master -- its RSSI (dBm) and when.
 extern int8_t masterRssi;
 extern unsigned long masterRssiAt;

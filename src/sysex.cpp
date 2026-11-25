@@ -21,6 +21,7 @@
 #include "storage.h"
 #include "watchdog.h"
 #include "host_clock.h"
+#include "mesh_admit.h"
 
 
 // The media-sync relay used to fire one esp_now_send() per slave back-to-back and throw every
@@ -648,6 +649,21 @@ void handleSysExMessage(const uint8_t* data, uint16_t length) {
           break;
         }
         setStoredRole(role);
+      } else {
+        sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
+      }
+      break;
+
+    case SYSEX_CMD_SET_MESH:
+      // Nowde 3 — Format: F0 7D 12 [id low 7 bits] [id high 7 bits] F7 ; 0 = open (src/mesh_admit.h).
+      // Stored in NVS, live: the next beacon carries it, the next frame is judged by it. Answers
+      // CONFIG_STATE (the id itself is not read back yet: nowde_sysex.py's set_mesh is the record).
+      if (length >= 6) {
+        uint16_t id = mesh_admit::fromSysEx(data[3], data[4]);
+        nowdeMeshId = id;
+        saveMeshIdToEEPROM(id);
+        DEBUG_SERIAL.printf("[MESH] id %u%s\r\n", id, id == mesh_admit::OPEN ? " (open)" : "");
+        sendConfigState();
       } else {
         sendErrorReport(ERROR_CONFIG_INVALID, nullptr, 0);
       }

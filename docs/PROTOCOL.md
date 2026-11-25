@@ -49,6 +49,7 @@ encoded: M  b0' b1' … b6'     | M' b7' b8'      M = Σ (bi>>7) << i
 | `70` | SET_NEIGHBOURS *(2.4, bench builds only)* | `F0 7D 70 [n × mac(6), 7-bit packed] F7`, n ≤ 8 | Only in builds with `-DNOWDE_BENCH_NEIGHBOURS` (envs `devkit-meshmask`, `atoms3-meshmask`): every ESP-NOW frame from a MAC not listed — the clock's `MCK` included — is dropped before dispatch, so three nodes on one desk play a relay chain. `n = 0` accepts everyone. RAM only; answers `HELLO`. Every other build answers `ERROR_REPORT 02` with the command byte as context. Never on an installation. |
 | `0E` | SET_ORIGIN *(v2.2)* | `F0 7D 0E [mac(6→7)] F7` | With a MAC: **pins** the origin lock to that master and holds it through any silence. Without one (`F0 7D 0E F7`, 4 bytes): releases the lock, and the next `MediaSyncPacket` heard adopts its sender. Answers `CONFIG_STATE`. Not stored — a lock is a live fact, not a config. |
 | `0F` | CLAIM *(Nowde 3)* | `F0 7D 0F F7` | A host claim: an auto or pinned node becomes the sender with a fresh term (§Nowde 3 election). `QUERY_CONFIG`, `PUSH_FULL_CONFIG` and the first `MEDIA_SYNC` after 5 s without one claim the same way. A role change answers an unsolicited `HELLO`. |
+| `12` | SET_MESH *(Nowde 3)* | `F0 7D 12 idLo(1) idHi(1) F7` | This node's mesh id, 14 bits as two 7-bit bytes (low first), `0` = open. Stored in NVS, live: the next beacon carries it. Two nodes hear each other unless **both** carry a non-zero id and the ids differ (§Nowde 3 admission). Answers `CONFIG_STATE`; the id is not read back yet. Not relayed despite the range. |
 | `13` | SET_LED *(Nowde 3)* | `F0 7D 13 pin(1) brightness(1) dark(1) F7` | This node's status pixel (a WS2812/SK6812): `pin` its GPIO, `7F` = no pixel; `brightness` `0`–`127` (default `16`: low); `dark` `1` = show-dark, the pixel stays off except for errors and an identify. Defaults per board: DevKitC-1 GPIO48 (a v1.1 board wants `38`), AtomS3 Lite 35, M5 Atom 27, a generic ESP32 none. Stored in NVS, applied live; answers `CONFIG_STATE`. A pin that is not an output, or the button's, answers `ERROR_REPORT 01`. For this node only — never relayed, though its id sits in the `0x10` range. |
 | `14` | IDENTIFY *(Nowde 3)* | `F0 7D 14 F7` | The pixel strobes white for 3 s, then blinks the hop count to the sender (none yet: the hop count arrives with the range work). Same as a short press on the button. No answer. For this node only — never relayed. |
 
@@ -544,6 +545,24 @@ Replaces the v2 resolution below on every board. The host decides, the rank arbi
   own frames never count, so a standby cut off from everyone never claims.
 - An auto sender whose host has been silent 5 s stops sending; a pin keeps beaconing from boot.
 - Every role change pushes an unsolicited `HELLO` to the host.
+
+## Nowde 3 admission (nowde#t-050 ⑤, `src/mesh_admit.h`)
+
+One mesh per show. A node's mesh id (`SET_MESH 0x12`, NVS, `0` = open) rides the beacon's v3
+trailer (`meshId`), the only frame that names a mesh. The rule is symmetric: two nodes hear each
+other unless both ids are non-zero and differ. An open node hears every mesh; an open sender is
+heard by every node; two shows configured `5` and `6` side by side never hear each other.
+
+A v3 beacon of another mesh marks its sender **foreign** for `SENDER_TIMEOUT_MS` after its last
+such beacon. Every frame from a foreign MAC is dropped before dispatch: its `MCK`, `MEDIA_SYNC`
+and `0x04` (a slave locks on `MEDIA_SYNC` by layer, not by beacon), its relays (a `0x05` envelope
+whose origin is foreign, whoever relays it), its company for the standby takeover and its rank in
+the election. A beacon of an admitted mesh from the same MAC clears the mark at once. Logged as
+`[MESH] ignoring <mac>: mesh <theirs>, this node <mine>`, at most every 10 s per run of beacons.
+
+Legacy frames carry no id and pass as before: a 1-byte beacon (v1.2 / 2.x), every 2.x frame. A
+foreign mesh's 2.x slaves send no beacon and so stay unmarked. The 2.4 over-the-air SysEx
+whitelist (`src/air_sysex.h`) applies after admission, unchanged.
 
 ## v2 role resolution (boot) — 2.x builds
 

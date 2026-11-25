@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "air_sysex.h"
+#include "mesh_admit.h"
 #include "mesh_relay.h"
 #include "midi_event.h"
 #include "nowde_config.h"
@@ -47,6 +48,11 @@ uint8_t benchNeighbours[NOWDE_MAX_NEIGHBOURS][6] = {};
 uint8_t benchNeighbourCount = 0;
 #endif
 
+// Nowde 3 admission (#t-050 ⑤): the nodes whose beacon named another mesh. Every frame from them
+// is dropped before dispatch until SENDER_TIMEOUT_MS after their last such beacon. Receive
+// callback only (the Wi-Fi task): SET_MESH never touches it, a stale entry times out.
+static mesh_admit::ForeignTable<MAX_SENDERS> foreignMesh;
+
 // A master whose beacon this node heard and has not timed out (handleSenderBeacon's table).
 static bool isKnownSender(const uint8_t* mac) {
   for (int i = 0; i < MAX_SENDERS; i++) {
@@ -75,6 +81,34 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     }
   }
 #endif
+
+  // Nowde 3 admission (#t-050 ⑤, src/mesh_admit.h): a v3 beacon names its mesh. One of another
+  // mesh marks its sender foreign; from then on nothing it sends reaches this node -- not its
+  // MCK, not its MEDIA_SYNC (a slave locks by layer, not by beacon), not as company, not as a
+  // rival. A beacon of an admitted mesh from it clears the mark at once. 1-byte beacons and every
+  // 2.x / v1.2 frame carry no id: they pass as before. The beacon is decoded again below.
+  {
+    uint16_t mine = nowdeMeshId;
+    if (data[0] == ESPNOW_MSG_SENDER_BEACON) {
+      election::Rank r;
+      uint16_t theirs = mesh_admit::OPEN;
+      if (election::decodeBeacon(data, static_cast<size_t>(len), info->src_addr, &r, &theirs) &&
+          !mesh_admit::admits(mine, theirs)) {
+        static unsigned long lastForeignLog = 0;
+        if (!foreignMesh.has(info->src_addr, millis(), SENDER_TIMEOUT_MS) || millis() - lastForeignLog > 10000) {
+          lastForeignLog = millis();
+          const uint8_t* m = info->src_addr;
+          DEBUG_SERIAL.printf("[MESH] ignoring %02X:%02X:%02X:%02X:%02X:%02X: mesh %u, this node %u\r\n",
+                              m[0], m[1], m[2], m[3], m[4], m[5], theirs, mine);
+        }
+        foreignMesh.note(info->src_addr, millis());
+        return;
+      }
+      foreignMesh.forget(info->src_addr);
+    } else if (foreignMesh.has(info->src_addr, millis(), SENDER_TIMEOUT_MS)) {
+      return;
+    }
+  }
 
   // 2.4: RSSI of the last frame heard straight from the locked master (any type, MCK included):
   // HELLO, ReceiverInfo and so RUNNING_STATE report it. A relayed frame's src is the relay.
@@ -148,7 +182,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       // A v3 beacon carries the sender's rank (§Wire contract); a 1-byte one (v1.2 / 2.x) is an
       // external pinned master: followed, never competed with.
       election::Rank rank;
-      uint16_t meshId = 0;  // admission (⑤) reads it; open mesh until then
+      uint16_t meshId = 0;  // admitted above: another mesh never gets here
       bool v3 = election::decodeBeacon(data, static_cast<size_t>(len), info->src_addr, &rank, &meshId);
       electionBeacon(info->src_addr, v3 ? &rank : nullptr);
       handleSenderBeacon(info);
@@ -204,6 +238,11 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
         break;  // no inner packet at all -- malformed or truncated, drop silently
       }
       const MeshRelayHeader* header = reinterpret_cast<const MeshRelayHeader*>(data);
+      // Nowde 3 admission: a 2.x relay has no mesh id and floods another mesh's master too.
+      // Its frames are judged by their origin, as if heard straight from it.
+      if (foreignMesh.has(header->origin, millis(), SENDER_TIMEOUT_MS)) {
+        break;
+      }
       const uint8_t* inner = data + sizeof(MeshRelayHeader);
       int innerLen = len - static_cast<int>(sizeof(MeshRelayHeader));
 

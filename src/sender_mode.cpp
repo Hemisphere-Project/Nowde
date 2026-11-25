@@ -68,7 +68,7 @@ void sendSenderBeacon() {
   uint8_t beacon[1 + election::BEACON_TRAILER_LEN];
   beacon[0] = ESPNOW_MSG_SENDER_BEACON;
   election::Rank rank = electionRank();
-  size_t n = 1 + election::encodeTrailer(rank, 0 /* meshId: ⑤ */, beacon + 1);
+  size_t n = 1 + election::encodeTrailer(rank, nowdeMeshId, beacon + 1);
   esp_err_t result = esp_now_send(broadcastAddress, beacon, n);
   (void)result;
 

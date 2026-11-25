@@ -340,6 +340,7 @@
 // Bridge → Receivers via Sender (0x10-0x1F)
 #define SYSEX_CMD_MEDIA_SYNC 0x10
 #define SYSEX_CMD_CHANGE_RECEIVER_LAYER 0x11
+#define SYSEX_CMD_SET_MESH 0x12          // Nowde 3: F0 7D 12 idLo(7) idHi(7) F7 — the mesh id, 0 = open; NVS, live
 #define SYSEX_CMD_SET_LED 0x13           // Nowde 3: F0 7D 13 pin brightness(0-127) dark(0/1) F7 — NVS, live
 #define SYSEX_CMD_IDENTIFY 0x14          // Nowde 3: F0 7D 14 F7 — white strobe 3 s, then the hop count
 

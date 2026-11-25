@@ -429,6 +429,7 @@ void setup() {
   // 2.0.3: LR is a stored switch (SET_LR 0x0B -> NVS -> restart), no longer a build. LR-only
   // PHY must be set after the interface is up and before the channel, and every node on the
   // mesh needs the same setting or it simply will not see the others (all-or-nothing).
+  nowdeMeshId = loadMeshIdFromEEPROM();  // Nowde 3 admission: the beacon carries it from the first one
   lrMode = loadLrFromEEPROM();
   lrEnabled = lrMode != NOWDE_LR_OFF;
   if (lrEnabled) {

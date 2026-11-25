@@ -17,6 +17,9 @@ bool loadLossPolicyFromEEPROM();
 // and show-dark flag; absent keys leave the caller's defaults (the board profile).
 void saveLedToEEPROM(uint8_t pin, uint8_t brightness, bool dark);
 void loadLedFromEEPROM(int8_t& pin, uint8_t& brightness, bool& dark);
+// Nowde 3 (SET_MESH 0x12): the mesh id, 0 = open (absent key).
+void saveMeshIdToEEPROM(uint16_t id);
+uint16_t loadMeshIdFromEEPROM();
 void clearEEPROM();
 
 // 2.0.1 mesh-resync self-heal: a persisted count of consecutive auto-reboots, so a poisoned

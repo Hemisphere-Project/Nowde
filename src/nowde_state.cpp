@@ -19,6 +19,7 @@ uint8_t storedRole = NOWDE_ROLE_AUTO;
 uint8_t nodeRole = NOWDE_ROLE_LEGACY;
 uint8_t boardId = NOWDE_BOARDID_UNKNOWN;
 bool lrEnabled = NOWDE_WIFI_LR != 0;   // overwritten from NVS in setup()
+volatile uint16_t nowdeMeshId = 0;   // Nowde 3: overwritten from NVS in setup()
 uint8_t lrMode = NOWDE_WIFI_LR;        // 2.4: NOWDE_LR_*, overwritten from NVS in setup()
 int8_t masterRssi = 0;
 unsigned long masterRssiAt = 0;

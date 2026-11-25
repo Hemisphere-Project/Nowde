@@ -102,6 +102,19 @@ void loadLedFromEEPROM(int8_t& pin, uint8_t& brightness, bool& dark) {
   preferences.end();
 }
 
+void saveMeshIdToEEPROM(uint16_t id) {
+  preferences.begin("nowde", false);
+  preferences.putUShort("mesh", id);
+  preferences.end();
+}
+
+uint16_t loadMeshIdFromEEPROM() {
+  if (!preferences.begin("nowde", true)) return 0;
+  uint16_t id = preferences.getUShort("mesh", 0);
+  preferences.end();
+  return id > 0x3FFF ? 0 : id;
+}
+
 void clearEEPROM() {
   preferences.begin("nowde", false);
   preferences.clear();
