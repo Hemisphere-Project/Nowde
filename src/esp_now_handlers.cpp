@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "air_sysex.h"
 #include "mesh_relay.h"
 #include "midi_event.h"
 #include "nowde_config.h"
@@ -45,6 +46,16 @@ void onDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status) {
 uint8_t benchNeighbours[NOWDE_MAX_NEIGHBOURS][6] = {};
 uint8_t benchNeighbourCount = 0;
 #endif
+
+// A master whose beacon this node heard and has not timed out (handleSenderBeacon's table).
+static bool isKnownSender(const uint8_t* mac) {
+  for (int i = 0; i < MAX_SENDERS; i++) {
+    if (senderTable[i].active && macEqual(senderTable[i].mac, mac)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (len < 1) {
@@ -95,15 +106,28 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     DEBUG_SERIAL.printf("(%d bytes)\r\n", len);
 
     // 2.4: raw SysEx over the air is a host command arriving without a host. Only one is ever
-    // sent that way -- the master's CHANGE_RECEIVER_LAYER to a slave -- so only that one runs,
-    // and only from the master this slave is locked to. Anything else (OTA, SET_ROLE, SET_LR,
-    // CONFIG...) from anyone in earshot is dropped and logged, never executed.
-    bool fromLockedOrigin = originLock.valid && macEqual(originLock.mac, info->src_addr);
-    if (len < 4 || data[1] != SYSEX_MANUFACTURER_ID || data[2] != SYSEX_CMD_CHANGE_RECEIVER_LAYER ||
-        !fromLockedOrigin) {
+    // sent that way -- the master's CHANGE_RECEIVER_LAYER to a slave -- so only that one runs:
+    // from the master this slave is locked to, or (#t-053) to a slave still on the factory "-"
+    // that follows nobody yet, from a master whose beacon it heard -- else a never-layered slave
+    // could never be given the layer it needs to lock. Anything else (OTA, SET_ROLE, SET_LR,
+    // CONFIG...) from anyone in earshot is dropped and logged, never executed. src/air_sysex.h.
+    bool layerCommand = len >= 4 && data[1] == SYSEX_MANUFACTURER_ID &&
+                        data[2] == SYSEX_CMD_CHANGE_RECEIVER_LAYER;
+    AirSysExNode node;
+    node.isSender = senderModeEnabled;
+    node.originLocked = originLock.valid;
+    node.unassigned = strncmp(subscribedLayer, NOWDE_LAYER_UNASSIGNED, MAX_LAYER_LENGTH) == 0;
+    AirSysExSource from;
+    from.lockedOrigin = originLock.valid && macEqual(originLock.mac, info->src_addr);
+    from.knownSender = isKnownSender(info->src_addr);
+    AirSysExVerdict verdict = airSysExVerdict(layerCommand, node, from);
+    if (!airSysExRuns(verdict)) {
       DEBUG_SERIAL.printf("[ESP-NOW RX] SysEx dropped: cmd %02X %s\r\n", len >= 3 ? data[2] : 0xFF,
-                          fromLockedOrigin ? "not whitelisted" : "not from the locked origin");
+                          airSysExReason(verdict));
       return;
+    }
+    if (verdict == AIR_SYSEX_RUN_FIRST_LAYER) {
+      DEBUG_SERIAL.printf("[ESP-NOW RX] SysEx accepted: %s\r\n", airSysExReason(verdict));
     }
 
     handleSysExMessage(data, static_cast<uint16_t>(len));

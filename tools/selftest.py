@@ -548,9 +548,11 @@ cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
 # serial link's wire, node bytes back through the stream parser -- tools/serial_link_test.cpp; and
 # (③) the LED + button vocabulary, src/led_pattern.h -- tools/led_pattern_test.cpp; and (④) the
 # election, src/election.{h,cpp} -- tools/election_test.cpp, built with the .cpp it tests.
+# #t-053: src/air_sysex.h, the rule for raw SysEx over the air, is the same kind of header and
+# runs the same way: tools/air_sysex_test.cpp.
 host_sources = {'election_test': ['election.cpp']}
 for host_test in ('midi_schedule_test', 'usb_midi_packets_test', 'midi_rx_test', 'serial_link_test',
-                  'led_pattern_test', 'election_test'):
+                  'led_pattern_test', 'election_test', 'air_sysex_test'):
     if not cxx:
         print(f"{host_test} SKIPPED: no host C++ compiler on PATH")
         continue
@@ -564,3 +566,9 @@ for host_test in ('midi_schedule_test', 'usb_midi_packets_test', 'midi_rx_test',
         run = subprocess.run([exe], capture_output=True, text=True)
         check(run.returncode == 0, f"{host_test}:\n{run.stdout}{run.stderr}")
         print(run.stdout.strip())
+
+# The firmware calls that header, and nothing else decides: the recv callback asks it before any
+# over-the-air SysEx runs.
+handlers = open(os.path.join(here, '..', 'src', 'esp_now_handlers.cpp')).read()
+check('airSysExVerdict(layerCommand, node, from)' in handlers and 'if (!airSysExRuns(verdict))' in handlers,
+      "esp_now_handlers.cpp runs raw SysEx from the air only on src/air_sysex.h's verdict")
