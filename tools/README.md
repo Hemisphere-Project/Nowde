@@ -20,7 +20,10 @@ uv run tools/nowde-sim.py master             # fake master node: HPlayer2 takes 
 - `nowde-bench.py` — the 2.4 desk acceptance as one tool: `nodes`, `accept` (one host) or
   `drive` + `listen` (two hosts), `lr` (LR checks 1-4, 6), `relay` (meshmask builds), `ota
   --inject-dup`, `lr-set` and `walk` (the range walk's CSV logger). Each run writes a JSON
-  report and ends on a PASS/FAIL screen; `selftest.py` pins its parsers.
+  report and ends on a PASS/FAIL screen (exit 0 all PASS, 1 a FAIL, 2 could not run);
+  `selftest.py` pins its parsers. It moves every node of a show onto the layer `nowde-bench`
+  and back after; on a rig Pi, `sudo touch /run/usbfix.inhibit` before `ota` (it refuses
+  otherwise) and remove it after.
 - `nowde-sim.py` — a software node on ALSA virtual MIDI ports (`Nowde - SIM`), master or
   slave (`--legacy` = a v1.2 receiver that never says HELLO). Lets a Pi or laptop run
   `biennale.py` / `25-annatv.py` against a node that does not exist yet.

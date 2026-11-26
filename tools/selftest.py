@@ -408,6 +408,84 @@ check(not ok and lines[-1].startswith('FAIL'), "summary: one FAIL fails the run"
 for c in ('nodes', 'accept', 'drive', 'listen', 'lr', 'relay', 'ota', 'lr-set', 'walk'):
     check(f'nowde-bench {c} ' in nb.__doc__, f"nowde-bench documents `{c}`")
 
+# 25/11 rig run (#t-049 ⑥): the three defects the first hardware run found, pinned where pure.
+# lr-set: a HELLO counts only if the node booted after SET_LR (its own pre-restart HELLO already
+# carries the new mode).
+h_old = nx.parse(nx.hello('2.4.0', uptime_ms=600000, role=0, board=2, sync_quality=0, lr=1))[1]
+h_new = nx.parse(nx.hello('2.4.0', uptime_ms=2500, role=0, board=2, sync_quality=0, lr=1))[1]
+check(not nb.booted_since(h_old, 100.0, 104.0), "lr-set: a HELLO from before the restart is not a read-back")
+check(nb.booted_since(h_new, 100.0, 104.0), "lr-set: a HELLO 2.5 s old, 4 s after SET_LR, is")
+check(not nb.booted_since(None, 100.0, 104.0), "lr-set: no HELLO proves nothing")
+
+
+class FakeNode:
+    """The node's side of SET_ROLE / SET_LOCAL_LAYER: each answers CONFIG_STATE with its layer."""
+
+    def __init__(self, pattern, layer):
+        self.pattern, self.name, self.layer, self.sent, self.out = pattern, 'Nowde - ' + pattern, layer, [], []
+
+    def mark(self):
+        return len(self.out)
+
+    def send(self, payload):
+        self.sent.append(payload)
+        if payload[1] == nx.CMD_SET_LOCAL_LAYER:
+            self.layer = bytes(payload[2:]).decode('ascii')
+        if payload[1] in (nx.CMD_SET_ROLE, nx.CMD_SET_LOCAL_LAYER):
+            self.out.append(nx.config_state(role=1, board=2, layer=self.layer))
+
+    def wait_for(self, cmd, timeout=2.0, mark=None):
+        return next((nx.parse(m)[1] for m in self.out[mark or 0:] if m[1] == cmd), None)
+
+
+# listen / drive / accept: every node of a show goes on the show's layer, and back after.
+fn, fw = FakeNode('CD83FC', '-'), FakeNode('26B8F8', 'garden')
+rep = {'checks': []}
+nb.take_all(rep, [(fn, 'slave'), (fw, 'master')])
+check(fn.layer == nb.SHOW_LAYER and fw.layer == nb.SHOW_LAYER and all(c['pass'] for c in rep['checks']),
+      f"take: both nodes on {nb.SHOW_LAYER} ({rep['checks']})")
+check("was '-'" in rep['checks'][0]['detail'], "take: the layer before is reported")
+nb.take(fn, 'slave')   # a second take (lr re-opens ports) must not forget the first layer
+nb._restore([fn, fw])
+check(fn.layer == '-' and fw.layer == 'garden' and not nb._layers_before, "restore: each node back on its own layer")
+check(nb.WALK_LAYER == '*', "walk streams on the wildcard: the far node is out of the tool's reach")
+
+
+
+class FakeSender(FakeNode):
+    """A sender under a host that polls: QUERY_RUNNING_STATE gets the table, QUERY_CONFIG HELLO."""
+
+    def send(self, payload):
+        self.sent.append(payload)
+        if payload[1] == nx.CMD_QUERY_RUNNING_STATE:
+            self.out += nx.running_state_chunks([])
+        elif payload[1] == nx.CMD_QUERY_CONFIG:
+            self.out += [nx.hello('2.4.0', role=1, board=2, sync_quality=2), nx.config_state(role=1, board=2, layer='-')]
+
+
+fs = FakeSender('26B8F8', '-')
+fs.info = {}
+hs = nb.Port.hello(fs)
+check(hs and hs['version'] == '2.4.0' and [m[1] for m in fs.sent] == [nx.CMD_QUERY_RUNNING_STATE, nx.CMD_QUERY_CONFIG],
+      "hello: a sender's table first, then QUERY_CONFIG (no side effect on a sender) for HELLO")
+fq = FakeNode('CD83FC', '-')
+fq.info = {}
+check(nb.Port.hello(fq) is None and [m[1] for m in fq.sent] == [nx.CMD_QUERY_RUNNING_STATE],
+      "hello: a silent node never gets QUERY_CONFIG (it would turn a legacy node into a sender)")
+
+# exit codes: 2 = could not run (no MIDI stack, no port), never 1 (= a node FAILed).
+_mido_real = nb._mido
+
+
+def _no_mido():
+    raise nb.CouldNotRun("no MIDI stack")
+
+
+nb._mido = _no_mido
+_rep = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'nowde-bench-selftest.json')
+check(nb.main(['--report', _rep, 'nodes']) == 2, "no MIDI stack = exit 2, not 1")
+nb._mido = _mido_real
+
 print("nowde-bench selftest OK")
 
 # ============================================================================================
