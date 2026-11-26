@@ -25,6 +25,13 @@ numbers (MTC offsets, fire spread) are a one-host measure and only `accept` / `l
 The firmware does not count stale 0x04 drops (they are silent by design), so a stale drop shows
 here as a lost event; NO_MEM is read from the node's own log (SET_LOG is on for the run).
 
+Two firmware behaviours a judge must not read as faults (26/11 rig, #t-057). A slave repeats the
+stopped CC#100=0 once a second only to a host it heard within 5 s, so every judged slave gets
+HPlayer2's keepalive (QUERY_RUNNING_STATE every 2 s) for the whole run. And about once a second a
+master re-sends the last value of every controller its host ever sent (0x04 SNAPSHOT, never
+deduplicated by design), so the sweep's controller is parked on a value outside the ledger
+before the show and after the sweep: the snapshot then only ever repeats the park.
+
 Every node a show check touches is put on the show's layer (`nowde-bench`) and put back on its
 own after: a slave follows MEDIA_SYNC only on its layer (or "*"), and a master stamps its 0x04
 events with its own (25/11 rig: a slave left on "-" heard nothing). `walk` streams on "*", since
@@ -51,6 +58,9 @@ SHOW_INDEX = 3            # the scripted show plays index 3 ...
 INTRUDER_INDEX = 5        # ... and the second master streams 5: a slave showing 5 changed origin
 EVENT_CC = 20             # the 0x04 sweep's controller (CC#100 is the index, never on the radio)
 EVENT_CH = 0
+EVENT_CC_PARK = 127       # the sweep controller's resting value, outside the ledger: all a SNAPSHOT repeats
+PARK_SETTLE_S = 0.3       # > the 90 ms event lead: a snapshot minted before the park lands before t0
+HOST_KEEPALIVE_S = 2.0    # HPlayer2's QUERY_RUNNING_STATE period; a slave's host link lasts 5 s
 MS_RATE_HZ = 10
 SHOW_LAYER = 'nowde-bench'   # every show check runs here; take() moves the nodes, _restore() back
 WALK_LAYER = '*'             # the walk's far node is out of reach: the wildcard reaches any layer
@@ -115,10 +125,20 @@ def show_position(script, t):
     return False, 0.0
 
 
-def event_plan(n_cc=128, notes=range(60, 73)):
-    """The 0x04 test's events, in send order: a CC#EVENT_CC sweep 0..n_cc-1, then the notes as
-    note-on/off pairs. Each event is unique by its key, which is what the ledger matches on."""
-    plan = [('control_change', EVENT_CH, EVENT_CC, v) for v in range(n_cc)]
+PARK = ('control_change', EVENT_CH, EVENT_CC, EVENT_CC_PARK)
+
+
+def event_plan(n_cc=EVENT_CC_PARK, notes=range(60, 73)):
+    """The 0x04 test's events, in send order: a CC#EVENT_CC sweep 0..n_cc-1, the PARK, then the
+    notes as note-on/off pairs. Each judged event is unique by its key, which is what the ledger
+    matches on. The master's SNAPSHOT re-sends its controller's last value about once a second and
+    a slave plays every copy (26/11 rig: dup 180-333 on a 60 s show), so the sweep stays below
+    EVENT_CC_PARK and ends on it: after the sweep, the snapshot repeats only the park, which the
+    ledger leaves out (run_show parks before the show too). During the sweep a slave drops the
+    snapshot's copy itself: a scheduled record for that controller is still waiting."""
+    if not 0 < n_cc <= EVENT_CC_PARK:
+        raise ValueError(f"the sweep stays below the park: n_cc 1..{EVENT_CC_PARK}, got {n_cc}")
+    plan = [('control_change', EVENT_CH, EVENT_CC, v) for v in range(n_cc)] + [PARK]
     for n in notes:
         plan += [('note_on', EVENT_CH, n, 100), ('note_off', EVENT_CH, n, 0)]
     return plan
@@ -132,8 +152,9 @@ def event_key(msg_type, channel, a, b):
 
 def ledger(plan, captures):
     """captures = {slave: [(t, key), ...]}. Per slave: lost / duplicated; across the first two
-    slaves: the fire-time spread (ms) of the events both received once."""
-    want = {event_key(*k) for k in plan}
+    slaves: the fire-time spread (ms) of the events both received once. The PARK is no event of
+    the test: every snapshot repeats it."""
+    want = {event_key(*k) for k in plan} - {event_key(*PARK)}
     out = {}
     first = {}
     for slave, caps in captures.items():
@@ -353,6 +374,23 @@ def send_event(port, ev):
         port.out.send(mido.Message(kind, channel=ch, note=a, velocity=b))
 
 
+class HostLink:
+    """Be each judged slave's host the way HPlayer2 is: a QUERY_RUNNING_STATE every
+    HOST_KEEPALIVE_S. A slave repeats the stopped CC#100=0 once a second only to a host it heard
+    within 5 s (HOST_LINK_TIMEOUT_MS); a judge that sends nothing reads 0-10 repeats in 60 s and
+    calls the firmware broken (26/11 rig, every slave of every master). A slave answers with its
+    HELLO; never QUERY_CONFIG, which turns a legacy node into a sender."""
+
+    def __init__(self, ports, every=HOST_KEEPALIVE_S):
+        self.ports, self.every, self.due = list(ports), every, None
+
+    def tick(self, now):
+        if self.ports and (self.due is None or now >= self.due):
+            for p in self.ports:
+                p.send(nx.query_running_state())
+            self.due = now + self.every
+
+
 def node_id_of(port):
     if port.info.get('node_id'):
         return port.info['node_id'].upper()
@@ -376,10 +414,17 @@ def finish(report, path):
 
 # ---- the show (accept / drive / listen) -----------------------------------------------
 
-def run_show(master, script, plan, second=None, layer=SHOW_LAYER, grab_at=None):
+def run_show(master, script, plan, second=None, layer=SHOW_LAYER, grab_at=None, judged=()):
     """Stream the script into `master` at MS_RATE_HZ; send `plan` across the second play
     segment at ~100 events/s; promote `second` for the middle of the first segment, streaming
-    INTRUDER_INDEX; read the master's RUNNING_STATE at `grab_at` s. Returns (t0, table)."""
+    INTRUDER_INDEX; read the master's RUNNING_STATE at `grab_at` s; keep the `judged` slaves'
+    host linked (HostLink). The master's controller is parked PARK_SETTLE_S before t0, so no
+    snapshot of an older value (a past run, an interrupted one) lands inside the ledger's
+    window. Returns (t0, table)."""
+    link = HostLink(judged)
+    link.tick(time.time())
+    send_event(master, PARK)
+    time.sleep(PARK_SETTLE_S)
     t0 = time.time()
     end = script[-1][1]
     next_ms, ev_i = 0.0, 0
@@ -408,6 +453,7 @@ def run_show(master, script, plan, second=None, layer=SHOW_LAYER, grab_at=None):
             ev_i += 1
         if grab_at is not None and table is None and st >= grab_at:
             table = master.running_state() or {}
+        link.tick(time.time())
         time.sleep(0.002)
     return t0, table
 
@@ -518,10 +564,10 @@ def cmd_accept(a):
     for p in allp:
         p.send(nx.set_log(True))
     time.sleep(1.0)
-    script, plan = _script(a), event_plan(32 if a.short else 128)
+    script, plan = _script(a), event_plan(32 if a.short else EVENT_CC_PARK)
     print(f"show: {script[1][1]:.0f} s play (seek at {script[0][1]:.0f} s), {script[2][1] - script[2][0]:.0f} s idle; "
           f"{len(plan)} events; {len(slaves)} slave(s){' + a second master' if second else ''}")
-    t0, table = run_show(master, script, plan, second, grab_at=script[1][1] - 1.0)
+    t0, table = run_show(master, script, plan, second, grab_at=script[1][1] - 1.0, judged=slaves)
     for p in slaves:
         judge_slave(report, p.name, p, script, t0, second is not None)
         judge_lock(report, p.name, table, node_id_of(p))
@@ -549,7 +595,7 @@ def cmd_drive(a):
     take_all(report, [(master, 'master')])
     master.send(nx.set_log(True))
     time.sleep(1.0)
-    script, plan = _script(a), event_plan(32 if a.short else 128)
+    script, plan = _script(a), event_plan(32 if a.short else EVENT_CC_PARK)
     print(f"driving {script[1][1]:.0f} s show + {len(plan)} events — start `listen` on the slave host first")
     _, table = run_show(master, script, plan, grab_at=script[1][1] - 1.0)
     report['table'] = (table or {}).get('receivers')
@@ -565,19 +611,22 @@ def cmd_drive(a):
 
 
 def cmd_listen(a):
-    """Delivery only: lock, index, stop, 1 Hz, gaps, events — on this host's clock alone."""
+    """Delivery only: lock, index, stop, 1 Hz, gaps, events — on this host's clock alone. This
+    host is each slave's host for the run (HostLink): the 1 Hz stop is only owed to a linked one."""
     report = {'command': 'listen', 'checks': []}
     slaves = _open(a.slave)
     take_all(report, [(p, 'slave') for p in slaves])
     for p in slaves:
         p.send(nx.set_log(True))
     before = {p.name: (p.hello() or {}).get('sync_gaps') for p in slaves}
-    script, plan = _script(a), event_plan(32 if a.short else 128)
+    script, plan = _script(a), event_plan(32 if a.short else EVENT_CC_PARK)
     total = script[-1][1] + a.wait
     print(f"listening {total:.0f} s — start `drive` on the master host now")
+    link = HostLink(slaves)
     t_open = time.time()
     first = {}
     while time.time() - t_open < total:
+        link.tick(time.time())
         for p in slaves:
             if p.name not in first:
                 _, idx, _ = p.captures(t_open)
@@ -591,7 +640,7 @@ def cmd_listen(a):
             check(report, f"{p.name}: the show arrived", False, f'no CC#100={SHOW_INDEX} in {total:.0f} s')
             continue
         judge_slave(report, p.name, p, script, t0, False, timing=False)
-        caps = p.captures(t0 - 1.0)[0]
+        caps = p.captures(t0)[0]   # drive parked the controller 0.3 s before: older snapshots stay out
         per, _ = ledger(plan, {p.name: caps})
         r = per[p.name]
         check(report, f"{p.name}: 0x04 events (lost / duplicated)", r['lost'] == 0 and r['duplicated'] == 0,
@@ -681,7 +730,7 @@ def cmd_lr(a):
     # 3: airtime under MEDIA_SYNC 10 Hz + a max-density CC sweep, 30 s per rate.
     A.send(nx.set_log(True))
     B.send(nx.set_log(True))
-    sweep = event_plan(128, notes=())
+    sweep = event_plan(notes=())
     for mode in ('250k', '500k'):
         if mode != lr_on:
             A, _ = set_lr(a.a, mode, A)
@@ -788,8 +837,8 @@ def cmd_relay(a):
             return finish(report, a.report)
         p.send(nx.set_log(True))
     P[0].send(nx.set_role('master'))
-    script, plan = _script(a), event_plan(32 if a.short else 128)
-    t0, _ = run_show(P[0], script, plan)
+    script, plan = _script(a), event_plan(32 if a.short else EVENT_CC_PARK)
+    t0, _ = run_show(P[0], script, plan, judged=P[2:])
     judge_slave(report, f"{P[2].name} (through the relay)", P[2], script, t0, False)
     h3 = P[2].hello() or {}
     check(report, f"{P[2].name}: LOCKED through the relay", h3.get('sync_quality') == SYNC_LOCKED,

@@ -22,7 +22,9 @@ uv run tools/nowde-sim.py master             # fake master node: HPlayer2 takes 
   --inject-dup`, `lr-set` and `walk` (the range walk's CSV logger). Each run writes a JSON
   report and ends on a PASS/FAIL screen (exit 0 all PASS, 1 a FAIL, 2 could not run);
   `selftest.py` pins its parsers. It moves every node of a show onto the layer `nowde-bench`
-  and back after; on a rig Pi, `sudo touch /run/usbfix.inhibit` before `ota` (it refuses
+  and back after, is each judged slave's host for the run (HPlayer2's 2 s keepalive: a slave
+  repeats the stopped CC#100=0 only to a linked host) and parks the 0x04 sweep's controller on
+  127, outside the ledger (the master's 1 Hz snapshot repeats it); on a rig Pi, `sudo touch /run/usbfix.inhibit` before `ota` (it refuses
   otherwise) and remove it after.
 - `nowde-sim.py` — a software node on ALSA virtual MIDI ports (`Nowde - SIM`), master or
   slave (`--legacy` = a v1.2 receiver that never says HELLO). Lets a Pi or laptop run

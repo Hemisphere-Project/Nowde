@@ -371,15 +371,33 @@ check(nb.mtc_offsets(script, t0, mtc) == [5.0, 5.0], f"MTC offsets: settle windo
 
 plan = nb.event_plan()
 keys = [nb.event_key(*e) for e in plan]
-check(len(plan) == 128 + 26 and len(set(keys)) == len(keys), "0x04 plan: every event unique")
+check(len(plan) == 127 + 1 + 26 and len(set(keys)) == len(keys), "0x04 plan: every event unique")
 check(all(not (e[0] == 'control_change' and e[2] == 100) for e in plan), "0x04 plan never uses CC#100")
 check(nb.event_key('note_on', 0, 60, 0) == nb.event_key('note_off', 0, 60, 0), "note-on velocity 0 = note-off")
 caps_a = [(1.000 + i * 0.01, k) for i, k in enumerate(keys)]
 caps_b = [(1.002 + i * 0.01, k) for i, k in enumerate(keys) if i != 3] + [(9.0, keys[7])]
 per, spread = nb.ledger(plan, {'a': caps_a, 'b': caps_b})
-check(per['a'] == {'sent': 154, 'received': 154, 'lost': 0, 'duplicated': 0}, f"ledger a {per['a']}")
-check(per['b'] == {'sent': 154, 'received': 153, 'lost': 1, 'duplicated': 1}, f"ledger b {per['b']}")
-check(spread['n'] == 152 and spread['max'] == 2.0, f"fire spread: events both got once ({spread})")
+check(per['a'] == {'sent': 153, 'received': 153, 'lost': 0, 'duplicated': 0}, f"ledger a {per['a']}")
+check(per['b'] == {'sent': 153, 'received': 152, 'lost': 1, 'duplicated': 1}, f"ledger b {per['b']}")
+check(spread['n'] == 151 and spread['max'] == 2.0, f"fire spread: events both got once ({spread})")
+
+# 26/11 rig (#t-057): about once a second the master's 0x04 SNAPSHOT re-sends the last value of
+# its controller, and a slave plays every copy (never deduplicated, by design): every slave read
+# dup 180-333. The sweep now stays below the park and ends on it; the park is outside the ledger.
+check(plan[127] == nb.PARK and all(e[3] < nb.EVENT_CC_PARK for e in plan[:127]),
+      "0x04 plan: the sweep stays below the park and ends on it")
+check(nb.event_plan(32)[32] == nb.PARK and len(nb.event_plan(32)) == 32 + 1 + 26, "--short: 32 CCs, the park, the notes")
+echo = caps_a + [(10.0 + i, nb.event_key(*nb.PARK)) for i in range(60)]
+check(nb.ledger(plan, {'a': echo})[0]['a'] == {'sent': 153, 'received': 153, 'lost': 0, 'duplicated': 0},
+      "ledger: a minute of snapshots repeating the park is no duplicate")
+stale = caps_a + [(10.0 + i, keys[126]) for i in range(60)]
+check(nb.ledger(plan, {'a': stale})[0]['a']['duplicated'] == 60, "ledger: a sweep value played again still counts")
+try:
+    nb.event_plan(128)
+    _refused = False
+except ValueError:
+    _refused = True
+check(_refused, "0x04 plan: a sweep that reaches the park is refused")
 
 ta = [(10.0 + i / 30.0, i * 1000 / 30.0 + 4) for i in range(30)]
 tc = [(10.0 + i / 30.0 + 0.003, i * 1000 / 30.0 + 3) for i in range(30)]
@@ -449,6 +467,28 @@ nb.take(fn, 'slave')   # a second take (lr re-opens ports) must not forget the f
 nb._restore([fn, fw])
 check(fn.layer == '-' and fw.layer == 'garden' and not nb._layers_before, "restore: each node back on its own layer")
 check(nb.WALK_LAYER == '*', "walk streams on the wildcard: the far node is out of the tool's reach")
+
+# 26/11 rig (#t-057): a slave repeats the stopped CC#100=0 only to a host heard within 5 s, and
+# `listen` sent nothing — 0-10 repeats in 60 s on every slave. The judge is now the slaves' host,
+# as HPlayer2 is: QUERY_RUNNING_STATE every 2 s (never QUERY_CONFIG), well inside the 5 s link.
+fl = FakeNode('CD83FC', '-')
+hl = nb.HostLink([fl])
+for t in (100.0, 100.5, 101.9, 102.0, 103.0, 104.1):
+    hl.tick(t)
+check([m[1] for m in fl.sent] == [nx.CMD_QUERY_RUNNING_STATE] * 3,
+      f"host link: one QUERY_RUNNING_STATE every 2 s, nothing else ({[hex(m[1]) for m in fl.sent]})")
+check(2 * nb.HOST_KEEPALIVE_S < 5.0, "host link: a lost poll still leaves the 5 s link up")
+# run_show parks the master's controller before t0 and polls every judged slave through the show.
+fm, fj = FakeNode('26B8F8', '-'), FakeNode('CD83FC', '-')
+_send_event, _settle, _evs = nb.send_event, nb.PARK_SETTLE_S, []
+nb.send_event = lambda port, ev: _evs.append((port.name, ev))
+nb.PARK_SETTLE_S = 0.0
+nb.run_show(fm, [(0.0, 0.1, True, 0.0), (0.1, 0.2, True, 0.0), (0.2, 0.25, False, 0.0)], nb.event_plan(1), judged=[fj])
+nb.send_event, nb.PARK_SETTLE_S = _send_event, _settle
+check(_evs == [(fm.name, nb.PARK)] and fm.sent and fm.sent[0][1] == nx.CMD_MEDIA_SYNC,
+      f"run_show: the park goes before the show's first MEDIA_SYNC ({_evs})")
+check(fj.sent and all(m[1] == nx.CMD_QUERY_RUNNING_STATE for m in fj.sent), "run_show: the judged slave is polled, only that")
+check('mido' not in sys.modules, "the run_show rows open no MIDI stack")
 
 
 
