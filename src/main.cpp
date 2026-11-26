@@ -33,6 +33,7 @@
 #include "esp_now_handlers.h"
 #include "mesh_relay.h"
 #include "midi.h"
+#include "mtc_due.h"
 #include "nowde_config.h"
 #include "nowde_state.h"
 #include "receiver_mode.h"
@@ -284,16 +285,12 @@ void espnowTask(void* parameter) {
         // Send MTC at configured framerate. 2.4: scheduled by frame, not by `now` -- this loop
         // ticks every 10 ms, so `last = now` against a 33 ms period fired every 40 ms (25/s).
         // The next due time advances by one frame period in microseconds; a stall longer than a
-        // frame re-anchors on now instead of bursting to catch up.
+        // frame re-anchors on now instead of bursting to catch up. #t-056: a due time left from
+        // before a stop (or from boot) is due now -- src/mtc_due.h.
         const uint32_t mtcPeriodUs = 1000000UL / MTC_FRAMERATE;
-        uint32_t nowUs = micros();
-        if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
+        if (mtcFrameDue(micros(), mediaSyncState.mtcNextDueUs, mtcPeriodUs)) {
           midiSendTimeCode(currentPositionMs);
           mediaSyncState.lastMTCUpdateTime = now;
-          mediaSyncState.mtcNextDueUs += mtcPeriodUs;
-          if ((int32_t)(nowUs - mediaSyncState.mtcNextDueUs) >= 0) {
-            mediaSyncState.mtcNextDueUs = nowUs + mtcPeriodUs;
-          }
         }
       }
 

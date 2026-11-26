@@ -451,7 +451,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 cxx = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
 # #t-053: src/air_sysex.h, the rule for raw SysEx over the air, is the same kind of header and
 # runs the same way: tools/air_sysex_test.cpp.
-HOST_TESTS = ('midi_schedule_test', 'air_sysex_test')
+# #t-056: src/mtc_due.h, when the slave's next MTC frame is due (a stale due time after a stop is
+# due now), likewise: tools/mtc_due_test.cpp.
+HOST_TESTS = ('midi_schedule_test', 'air_sysex_test', 'mtc_due_test')
 if not cxx:
     for name in HOST_TESTS:
         print(f"{name.replace('_test', '')} host test SKIPPED: no host C++ compiler on PATH")
@@ -472,3 +474,9 @@ else:
 handlers = open(os.path.join(here, '..', 'src', 'esp_now_handlers.cpp')).read()
 check('airSysExVerdict(layerCommand, node, from)' in handlers and 'if (!airSysExRuns(verdict))' in handlers,
       "esp_now_handlers.cpp runs raw SysEx from the air only on src/air_sysex.h's verdict")
+
+# The ESP-NOW task decides an MTC frame on src/mtc_due.h alone -- no second, inline compare.
+main_cpp = open(os.path.join(here, '..', 'src', 'main.cpp')).read()
+check('mtcFrameDue(micros(), mediaSyncState.mtcNextDueUs, mtcPeriodUs)' in main_cpp
+      and 'nowUs - mediaSyncState.mtcNextDueUs' not in main_cpp,
+      "main.cpp schedules MTC frames only through src/mtc_due.h")
